@@ -1,0 +1,5 @@
+node_modules/
+menubar/.build/
+menubar/*.app/
+*.log
+.DS_Store

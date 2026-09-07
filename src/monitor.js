@@ -1,0 +1,858 @@
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, contextLimitMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
+import { parseResetTime, calculateWaitMs } from './time-parser.js';
+import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
+import { loadConfig } from './config.js';
+import { createLogger } from './logger.js';
+import { readStopFailureEvent, clearStopFailureEvent, isRetryableError } from './events.js';
+import { writeStatus, clearStatus, sweepStaleStatus } from './status-file.js';
+import { readSessionPrompt } from './session-prompt.js';
+
+const DEFAULT_FOREGROUND_COMMANDS = ['node', 'claude', 'npx', 'tsx', 'bun', 'deno'];
+const SHELL_COMMANDS = ['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh'];
+// Only a usage-limit banner in the live tail counts — quoted limit text in scrollback
+// (a conversation about limits) or a banner the session already scrolled past is not the
+// current state and must not drive a retry. Matches the overload path's tail discipline.
+const RATE_LIMIT_TAIL_LINES = 12;
+// A StopFailure marker arriving more than this after our last event-path retry send is a
+// NEW overload incident (the retry turn succeeded in between), not an escalation of the
+// old one. Sized above Claude Code's own internal attempt-N/10 backoff (which can hold a
+// genuinely-failing turn open for several minutes before the hook fires).
+const OVERLOAD_INCIDENT_GAP_MS = 15 * 60_000;
+
+export function createMonitorState() {
+  return {
+    status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null,
+    // True while `waitUntil` came from a screen with NO parseable reset time (the
+    // fallbackWaitHours default) and is therefore still open to correction. See
+    // correctUsageWait.
+    _waitIsFallback: false,
+    // Overload-retry sub-state, kept distinct from the usage-reset fields above.
+    overloadAttempts: 0, overloadTotalWaitMs: 0, overloadWaitUntil: 0,
+    // viaEvent marks the current backoff window as event-triggered (edge: one send per
+    // failure). The scraper stays active alongside the event path — see the tick logic.
+    viaEvent: false,
+    // Safeguard/AUP false-positive retry sub-state (bounded, seconds-scale).
+    safeguardAttempts: 0, safeguardWaitUntil: 0,
+    // Context-limit compaction sub-state. Two-phase, so it needs one field the bounded
+    // families don't: _contextCompactedAt marks that a /compact was sent and the row has
+    // since cleared, which is what licenses the follow-up continuation send.
+    contextAttempts: 0, contextWaitUntil: 0, _contextCompactSentAt: 0,
+  };
+}
+
+// --- Overload backoff schedule (pure, testable) ---
+// Wait backoffSeconds[i] for attempt i; once the array is exhausted, steadyStateSeconds.
+export function overloadBaseWaitMs(attemptIndex, overload) {
+  const { backoffSeconds, steadyStateSeconds } = overload;
+  const secs = attemptIndex < backoffSeconds.length ? backoffSeconds[attemptIndex] : steadyStateSeconds;
+  return secs * 1000;
+}
+
+export function applyJitter(ms, jitterPct, rand = Math.random) {
+  if (!jitterPct) return ms;
+  const factor = 1 + (rand() * 2 - 1) * (jitterPct / 100);  // ±jitterPct%
+  return Math.max(0, Math.round(ms * factor));
+}
+
+export function nextOverloadWaitMs(attemptIndex, overload, rand = Math.random) {
+  return applyJitter(overloadBaseWaitMs(attemptIndex, overload), overload.jitterPct, rand);
+}
+
+function resetOverload(state) {
+  state.overloadAttempts = 0;
+  state.overloadTotalWaitMs = 0;
+  state.overloadWaitUntil = 0;
+  state.viaEvent = false;
+  state._gaveUp = false;
+  state._eventHandledBanner = null;
+}
+
+function resetSafeguard(state) {
+  state.safeguardAttempts = 0;
+  state.safeguardWaitUntil = 0;
+  state._safeguardGaveUp = false;
+  state._gaveUp = false;
+}
+
+function resetContext(state) {
+  state.contextAttempts = 0;
+  state.contextWaitUntil = 0;
+  state._contextCompactSentAt = 0;
+  state._contextCompactDeadline = 0;
+  state._contextGaveUp = false;
+  state._gaveUp = false;
+}
+
+// Foreground safety: is claude/node the foreground process (safe to send-keys), or did
+// it exit to a shell / is some other app focused? Returns { ok, fg, isShell }.
+async function checkForeground(tmuxAdapter, pane, config) {
+  const isFg = await tmuxAdapter.isClaudeForeground();
+  if (isFg === true) return { ok: true, fg: null, isShell: false };
+  const fg = await tmuxAdapter.getPaneCommand(pane);
+  const fgCommands = config.foregroundCommands || DEFAULT_FOREGROUND_COMMANDS;
+  if (fgCommands.some(c => fg.toLowerCase().includes(c))) return { ok: true, fg, isShell: false };
+  const lc = (fg || '').toLowerCase();
+  const isShell = lc !== '' && SHELL_COMMANDS.some(s => lc === s || lc.includes(s));
+  return { ok: false, fg, isShell };
+}
+
+// Reset text on screen → the absolute instant to wake up at. One source of truth for the
+// three callers that need it: first detection, the /rate-limit-options menu path, and the
+// mid-wait correction below. `parsed` is surfaced so callers can tell a real reset time
+// from the fallbackWaitHours default that calculateWaitMs returns for an unreadable screen.
+// Reads the SAME chrome-aware window the isRateLimited gate reads — an unbounded scan lets
+// reset-shaped text anywhere in the capture outrank the live banner (see the tailLines note
+// on findRateLimitMessage).
+function usageWaitUntil(stripped, config) {
+  const message = findRateLimitMessage(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES);
+  const parsed = message ? parseResetTime(message) : null;
+  const until = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
+  return { message, parsed, until };
+}
+
+// `fresh` starts a new retry episode: attempts and the give-up flag are cleared. Used by
+// the menu path, where a re-rendered /rate-limit-options menu means the session hit the
+// limit again rather than continuing the old episode.
+function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
+  const { message, parsed, until } = usageWaitUntil(stripped, config);
+  state.lastRateLimitMessage = message;
+  state.waitUntil = until;
+  state.status = 'waiting';
+  // Latch whether this wait is the fallback default rather than a real reset time. Only a
+  // fallback stays open to correction (correctUsageWait), so a wait derived from a genuine
+  // banner is never re-parsed — no window for stray reset-shaped text to move it, and none
+  // of the ~600 dead re-derivations a 5h wait would otherwise run.
+  state._waitIsFallback = !parsed;
+  state._gaveUp = false;
+  if (fresh) state.attempts = 0;
+  return 'waiting';
+}
+
+// Re-derive the wake-up from the LIVE banner while already waiting, and pull it earlier
+// when the standing wait is too long. Returns the banner text on a correction, else null.
+//
+// A wait computed from a screen that carried no parseable reset time lands on the
+// fallbackWaitHours default — potentially hours past the real reset. The
+// /rate-limit-options menu is the common source: it renders the options but not always the
+// reset line, while the banner Claude Code prints right after confirming DOES carry the
+// time. The waiting branch returned early on every tick and never looked at the pane again,
+// so that banner was ignored for the entire fallback. See the CHANGELOG entry for the
+// observed incident.
+//
+// Bounds, in order of how much they carry:
+//   - ONLY A FALLBACK WAIT is correctable (_waitIsFallback). Gating on the raw `attempts`
+//     counter instead both under- and over-shot: it blocked the menu-after-send flow (a
+//     menu re-rendered once attempts > 0 committed a fallback that could never be
+//     corrected — the very bug being fixed, surviving on that path) and left every
+//     correctly-derived wait exposed to re-parsing for its whole duration.
+//   - SHORTEN ONLY, by a margin (EPSILON). Never let the pane push a wake-up out.
+//   - Success clears the latch: the wait now comes from a real reset time, so it stops
+//     being a candidate and the correction logs exactly once.
+const WAIT_CORRECTION_EPSILON_MS = 1000;
+function correctUsageWait(state, stripped, config) {
+  if (!state._waitIsFallback) return null;
+  if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) return null;
+  const { message, parsed, until } = usageWaitUntil(stripped, config);
+  if (!parsed || until > state.waitUntil - WAIT_CORRECTION_EPSILON_MS) return null;
+  state.waitUntil = until;
+  state._waitIsFallback = false;
+  return message;
+}
+
+function enterOverload(state, overload, rand) {
+  const capMs = overload.maxTotalWaitMinutes * 60_000;
+  resetOverload(state);
+  state.status = 'overload';
+  const w = nextOverloadWaitMs(0, overload, rand);
+  if (w > capMs) {
+    // Degenerate config (first backoff already exceeds the cap): force the cap to
+    // trip on the next tick rather than entering a real retry loop.
+    state.overloadTotalWaitMs = capMs;
+    state.overloadWaitUntil = 0;
+    return 'overload-detected';
+  }
+  state.overloadTotalWaitMs = w;
+  state.overloadWaitUntil = Date.now() + w;
+  return 'overload-detected';
+}
+
+export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, rand = Math.random) {
+  if (!isAlive()) return 'exit';
+
+  // The message that resumes THIS session. A per-session override (see session-prompt.js) wins
+  // over the global one, for both paths that resume work — the usage-limit retry and the
+  // post-compaction continuation are the same instruction, and it would be incoherent for a
+  // session to carry its own prompt on one and the global prompt on the other.
+  const resumeMessage = async (fallback) => {
+    if (!tmuxAdapter.readSessionPrompt) return fallback;
+    return (await tmuxAdapter.readSessionPrompt()) || fallback;
+  };
+
+  // Capture generously (was 20, then 50): a live banner can sit far above the bottom behind
+  // a tall task widget + input box + footer — ~90 lines in the wild (#38). The detectors
+  // chrome-strip and tail-window this, so extra lines are free headroom, and the capture
+  // itself bounds how far back the rate-limit scan can reach (a stale banner deeper in
+  // scrollback stays out); 120 clears a large widget with margin.
+  const raw = await tmuxAdapter.capturePane(pane, 120);
+  const stripped = stripAnsi(raw);
+  const overload = config.overload;
+
+  // Handle the interactive /rate-limit-options menu before any other logic. A bare
+  // Enter here confirms the highlighted default, which on some Claude Code versions
+  // is "Upgrade your plan". Navigate to "Stop and wait for limit to reset" wherever
+  // it sits, confirm it, then enter the normal (hours-scale) wait state.
+  if (tmuxAdapter.sendKey && isRateLimitOptionsPrompt(stripped, RATE_LIMIT_TAIL_LINES)
+      && Date.now() >= (state._menuCooldownUntil || 0)) {
+    const cooldown = config.pollIntervalSeconds * 1000 * 2;
+
+    // Foreground safety: never send arrow/Enter keys unless Claude/node is the
+    // foreground process. Otherwise, if the user switched the pane to another app
+    // while the menu was up, we'd drive that app's UI instead.
+    const fgOk = await checkForeground(tmuxAdapter, pane, config);
+    if (!fgOk.ok) {
+      state._lastForeground = fgOk.fg;
+      state._menuCooldownUntil = Date.now() + cooldown;
+      return 'skipped-not-claude';
+    }
+
+    const steps = menuStepsToWaitOption(stripped, RATE_LIMIT_TAIL_LINES);
+    if (steps === null) {
+      // Layout unreadable — refuse to press Enter (could confirm "Upgrade").
+      state._menuCooldownUntil = Date.now() + cooldown;
+      return 'menu-unreadable';
+    }
+    const key = steps >= 0 ? 'Down' : 'Up';
+    for (let i = 0; i < Math.abs(steps); i++) {
+      await tmuxAdapter.sendKey(pane, key);
+      await new Promise(r => setTimeout(r, 80));
+    }
+    await tmuxAdapter.sendKey(pane, 'Enter');
+    // Parse the reset time straight from the menu text, so the wait does not depend on the
+    // limit banner still being visible afterward. The menu does not always RENDER a reset
+    // line, though — that lands on the fallbackWaitHours default, which correctUsageWait
+    // then pulls back in once Claude Code prints the real banner post-confirm.
+    //
+    // fresh: a menu we just confirmed means the session hit the limit again, so this is a
+    // new retry episode — carrying the old attempt count over left the correction blocked
+    // and, once maxRetries had been reached, published a healthy-looking countdown that
+    // gave up again on expiry without ever sending.
+    enterUsageWait(state, stripped, config, { fresh: true });
+    state._menuCooldownUntil = Date.now() + cooldown;
+    return 'menu-confirmed';
+  }
+
+  if (state.status === 'waiting') {
+    // Keep counting down UNLESS the session has resumed working. A resumed pane means
+    // the user manually continued (often to unstick a wrong/stale wait) — falling through
+    // to the gate below returns us to monitoring, so a SECOND, genuine limit that
+    // follows is detected instead of being masked until the old timer expires (issue #39).
+    // resumedAfterLimit, not plain isWorking: `Retrying in …`/`attempt N/M` also match
+    // transcript text (a flaky deploy log ABOVE a live banner), and treating that as
+    // "continued" churned waiting↔user-continued forever without ever sending the retry.
+    // Resumed = working signal rendered BELOW the last banner line.
+    // Before honouring the countdown, re-read the banner: the standing wait may have been
+    // derived from a screen that never showed the reset time (see correctUsageWait).
+    // lastRateLimitMessage is set ONLY on the branch that logs it — a correction that falls
+    // through to 'retried'/'user-continued' would otherwise leave the message set for the
+    // next plain 'waiting' tick to log as a spurious fresh detection.
+    const correctedMessage = correctUsageWait(state, stripped, config);
+    if (Date.now() < state.waitUntil && !resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
+      if (!correctedMessage) return 'waiting';
+      state.lastRateLimitMessage = correctedMessage;
+      return 'wait-corrected';
+    }
+    if (!isAlive()) return 'exit';
+
+    // Stop driving the session if the limit cleared OR Claude has already resumed and
+    // is working again. Without the resumed gate the usage path re-sends the retry
+    // message every poll (up to maxRetries) while the limit banner lingers in the
+    // captured scrollback after a successful resume — spamming an actively-working
+    // session (and a banner re-printed by another process keeps it "rate-limited" the
+    // whole time). Resumed ⇒ the session continued; never inject into it.
+    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
+      state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
+      state._waitIsFallback = false;
+      return 'user-continued';
+    }
+
+    if (state.attempts >= config.maxRetries) {
+      // Stay in 'waiting' to avoid re-detecting the stale rate limit on the next tick
+      // and creating an infinite max-retries loop. This IS a give-up (no further
+      // retries will be sent while the banner persists) even though `status` stays
+      // 'waiting' — flagged so external consumers (tmux status bar) don't render a
+      // perpetually-resetting countdown for a monitor that has stopped acting.
+      state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      state._gaveUp = true;
+      state._waitIsFallback = false;   // give-up backoff, deliberately unrelated to the reset time
+      return 'max-retries';
+    }
+
+    // Primary check: is the Claude process in the foreground process group?
+    // On macOS, pane_current_command reports "zsh" instead of the child process,
+    // so we use `ps -o stat=` to check the '+' (foreground) flag directly.
+    // `true` short-circuits past pane_current_command (fixes macOS).
+    // `false`/`null` falls back to pane_current_command for safety.
+    const isFg = await tmuxAdapter.isClaudeForeground();
+    if (isFg !== true) {
+      const fg = await tmuxAdapter.getPaneCommand(pane);
+      const fgCommands = config.foregroundCommands || DEFAULT_FOREGROUND_COMMANDS;
+      if (!fgCommands.some(c => fg.toLowerCase().includes(c))) {
+        state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+        state._lastForeground = fg;
+        return 'skipped-not-claude';
+      }
+    }
+
+    // Increment attempts and set cooldown BEFORE sendKeys so that a failure
+    // (e.g. pane destroyed) still consumes a retry and avoids tight-loop errors.
+    state.attempts++;
+    state.waitUntil = Date.now() + 30_000;
+    state._waitIsFallback = false;   // send cooldown, deliberately unrelated to the reset time
+    await tmuxAdapter.sendKeys(pane, await resumeMessage(config.usageLimitMessage));
+    return 'retried';
+  }
+
+  if (state.status === 'overload') {
+    if (Date.now() < state.overloadWaitUntil) return 'overload-waiting';
+    if (!isAlive()) return 'exit';
+
+    // Event-triggered window: a StopFailure marker put us here. Edge-triggered — send
+    // exactly once per failure, then return to monitoring to await the next marker. We
+    // do NOT re-check the scraper for "still overloaded" (the marker was authoritative).
+    if (state.viaEvent) {
+      // Self-recovery: Claude resumed during the backoff → don't interrupt it.
+      if (isWorking(stripped)) { resetOverload(state); state.status = 'monitoring'; return 'overload-cleared'; }
+      // A usage limit appearing mid-wait still takes precedence.
+      if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) { resetOverload(state); return enterUsageWait(state, stripped, config); }
+
+      const foregroundOk = await checkForeground(tmuxAdapter, pane, config);
+      if (!foregroundOk.ok) {
+        state._lastForeground = foregroundOk.fg;
+        state.viaEvent = false; state.status = 'monitoring';
+        if (foregroundOk.isShell && overload.relaunchOnExit) {
+          state.overloadAttempts++;
+          await tmuxAdapter.sendKeys(pane, overload.relaunchCommand);
+          return 'overload-relaunched';
+        }
+        return foregroundOk.isShell ? 'overload-exited-to-shell' : 'skipped-not-claude';
+      }
+
+      state.overloadAttempts++;          // next failure backs off further
+      state._lastEventRetryAt = Date.now();   // incident-gap anchor (see the marker consume)
+      state.viaEvent = false;
+      state.status = 'monitoring';
+      // Remember the banner we just retried via the event path so the always-on scraper
+      // doesn't re-detect this same, uncleared render next tick and open a second backoff.
+      const handled = overloadMatch(stripped, overload.patterns);
+      state._eventHandledBanner = handled ? `${handled.pattern} ${handled.line}` : null;
+      await tmuxAdapter.sendKeys(pane, overload.retryMessage);
+      return 'overload-retried';
+    }
+
+    const capMs = overload.maxTotalWaitMinutes * 60_000;
+
+    // Usage-limit takes precedence: hand off to the (hours-scale) reset path.
+    if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
+      resetOverload(state);
+      return enterUsageWait(state, stripped, config);
+    }
+
+    // Overload text gone → recovered. Back to plain monitoring.
+    if (!detectOverload(stripped, overload.patterns)) {
+      state.status = 'monitoring';
+      resetOverload(state);
+      return 'overload-cleared';
+    }
+
+    // Terminal-state gate: if Claude is actively working (its own internal retry
+    // or a fresh response is streaming), the error is NOT terminal. Defer without
+    // consuming an attempt so we never double-drive a live session.
+    if (isWorking(stripped)) {
+      state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      return 'overload-working';
+    }
+
+    // Mandatory cap: give up loudly rather than hammer a genuinely-down endpoint
+    // or mask a real outage. Long cooldown to avoid re-detecting the stale error.
+    if (state.overloadTotalWaitMs >= capMs) {
+      state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      state._gaveUp = true;
+      return 'overload-gave-up';
+    }
+
+    // Foreground safety, reused from the usage path: only act when claude/node is
+    // the foreground process. (See the gating decision in the README.)
+    const isFg = await tmuxAdapter.isClaudeForeground();
+    let foregroundOk = isFg === true;
+    let fg = null;
+    if (!foregroundOk) {
+      fg = await tmuxAdapter.getPaneCommand(pane);
+      const fgCommands = config.foregroundCommands || DEFAULT_FOREGROUND_COMMANDS;
+      foregroundOk = fgCommands.some(c => fg.toLowerCase().includes(c));
+    }
+
+    if (!foregroundOk) {
+      // Distinguish "claude exited to the shell" (error visible above a shell
+      // prompt) from "some other foreground app", for diagnostics + opt-in relaunch.
+      const lc = (fg || '').toLowerCase();
+      const isShell = lc !== '' && SHELL_COMMANDS.some(s => lc === s || lc.includes(s));
+      state._lastForeground = fg;
+      if (isShell && overload.relaunchOnExit) {
+        state.overloadAttempts++;
+        const w = nextOverloadWaitMs(state.overloadAttempts, overload, rand);
+        state.overloadTotalWaitMs += w;
+        state.overloadWaitUntil = Date.now() + w;
+        await tmuxAdapter.sendKeys(pane, overload.relaunchCommand);
+        return 'overload-relaunched';
+      }
+      state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return isShell ? 'overload-exited-to-shell' : 'skipped-not-claude';
+    }
+
+    // Alive at the prompt → send the retry, then schedule the next backoff window.
+    // Increment + schedule BEFORE sendKeys so a send failure still consumes the slot.
+    state.overloadAttempts++;
+    const w = nextOverloadWaitMs(state.overloadAttempts, overload, rand);
+    state.overloadTotalWaitMs += w;
+    state.overloadWaitUntil = Date.now() + w;
+    await tmuxAdapter.sendKeys(pane, overload.retryMessage);
+    return 'overload-retried';
+  }
+
+  if (state.status === 'safeguard') {
+    if (Date.now() < state.safeguardWaitUntil) return 'safeguard-waiting';
+    if (!isAlive()) return 'exit';
+    const safeguard = config.safeguard;
+
+    // A usage limit or Claude resuming takes precedence / means recovery.
+    if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
+      resetSafeguard(state); return enterUsageWait(state, stripped, config);
+    }
+    // In flight (our retry, or the user typing continued things). Defer WITHOUT consuming
+    // or resetting — a tick landing mid-retry must not zero the counter, or a sticky flag
+    // re-enters with a fresh budget and the maxRetries bound never trips (verified: it
+    // retried indefinitely). Mirrors the overload branch. Recovery is decided at the next
+    // idle tick: flag gone -> cleared; flag still there -> the count stands.
+    if (isWorking(stripped)) {
+      state.safeguardWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      return 'safeguard-working';
+    }
+
+    // Flag gone → recovered.
+    if (!detectSafeguard(stripped, safeguard.patterns)) {
+      resetSafeguard(state); state.status = 'monitoring'; return 'safeguard-cleared';
+    }
+
+    // Sticky flag: give up loudly rather than loop. Long cooldown so we don't re-detect
+    // the stale error every tick.
+    if (state.safeguardAttempts >= safeguard.maxRetries) {
+      state.safeguardWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      state._gaveUp = true;
+      // Give up LOUDLY — once. Subsequent holds are silent or the warn re-logs ~1/min
+      // for as long as the sticky banner sits at the prompt.
+      if (state._safeguardGaveUp) return 'safeguard-holding';
+      state._safeguardGaveUp = true;
+      return 'safeguard-gave-up';
+    }
+
+    // Foreground safety: only send when claude/node is foreground.
+    const fg = await checkForeground(tmuxAdapter, pane, config);
+    if (!fg.ok) {
+      state._lastForeground = fg.fg;
+      state.safeguardWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return 'skipped-not-claude';
+    }
+
+    // Increment + schedule BEFORE send so a send failure still consumes the slot.
+    state.safeguardAttempts++;
+    state.safeguardWaitUntil = Date.now() + (safeguard.retryDelaySeconds * 1000);
+    await tmuxAdapter.sendKeys(pane, safeguard.retryMessage);
+    return 'safeguard-retried';
+  }
+
+  // Context limit: compact, then resume. Unlike the bounded families above this is a TWO-PHASE
+  // machine, because the remedy is a turn of its own — the session has to finish compacting
+  // before it can accept the continuation. The phases are told apart by _contextCompactSentAt
+  // rather than by a separate status, so a monitor restarted mid-compaction simply re-detects
+  // the row (if compaction never landed) or finds a clean idle prompt (if it did).
+  if (state.status === 'context') {
+    if (Date.now() < state.contextWaitUntil) return 'context-waiting';
+    if (!isAlive()) return 'exit';
+    const contextLimit = config.contextLimit;
+
+    // A usage limit outranks this: it is the hours-scale wait, and compacting would not help.
+    if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
+      resetContext(state); return enterUsageWait(state, stripped, config);
+    }
+
+    // In flight — the compaction turn itself, or the user having taken over. Defer WITHOUT
+    // consuming an attempt, and push the deadline out, so a long compaction is never mistaken
+    // for one that failed to start. Same discipline as the overload/safeguard branches.
+    if (isWorking(stripped)) {
+      state.contextWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      if (state._contextCompactSentAt) {
+        state._contextCompactDeadline = Date.now() + (contextLimit.compactTimeoutSeconds * 1000);
+      }
+      return 'context-working';
+    }
+
+    const still = contextLimitMatch(stripped);
+
+    // Row gone at an idle prompt. If we had sent /compact, the compaction landed and the
+    // session is sitting at a usable prompt with nothing driving it — this is the whole point
+    // of the family, so send the continuation. If we had NOT sent anything yet, the user (or
+    // an auto-compact) cleared it first and there is nothing to resume.
+    if (!still) {
+      if (!state._contextCompactSentAt) {
+        resetContext(state); state.status = 'monitoring'; return 'context-cleared';
+      }
+      const fg = await checkForeground(tmuxAdapter, pane, config);
+      if (!fg.ok) {
+        state._lastForeground = fg.fg;
+        state.contextWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+        return 'skipped-not-claude';
+      }
+      // Clear BEFORE the send: a send failure must not leave the machine primed to resume a
+      // second time on the next tick.
+      resetContext(state);
+      state.status = 'monitoring';
+      await tmuxAdapter.sendKeys(pane, await resumeMessage(contextLimit.retryMessage));
+      return 'context-resumed';
+    }
+
+    // Row still up. /clear-only (DISABLE_COMPACT) is detected but never acted on — clearing
+    // discards the conversation, which is not a decision a background daemon gets to make.
+    if (!still.actionable) {
+      state.contextWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      state._gaveUp = true;
+      if (state._contextGaveUp) return 'context-holding';
+      state._contextGaveUp = true;
+      state._contextMatch = still.line;
+      return 'context-clear-only';
+    }
+
+    // Sent /compact and the row is still there. Give it until the deadline before calling the
+    // attempt spent: the row survives for a beat after the send (the keystrokes have to render
+    // and the turn has to start), and a compaction that is between phases can read as idle for
+    // a tick. compactTimeoutSeconds is polled as a DEADLINE rather than slept through, so a
+    // compaction that finishes in 20s is resumed in 20s, not 180.
+    if (state._contextCompactSentAt && Date.now() < (state._contextCompactDeadline || 0)) {
+      state.contextWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      return 'context-compact-pending';
+    }
+
+    // The deadline passed with the row still up at an idle prompt → compaction did not clear
+    // it (it can fail outright: "compact failed", a PreCompact hook blocking it, or a single
+    // exchange too large to summarise). Spend the next attempt, or give up.
+    if (state.contextAttempts >= contextLimit.maxRetries) {
+      state.contextWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      state._gaveUp = true;
+      if (state._contextGaveUp) return 'context-holding';
+      state._contextGaveUp = true;
+      return 'context-gave-up';
+    }
+
+    const fg = await checkForeground(tmuxAdapter, pane, config);
+    if (!fg.ok) {
+      state._lastForeground = fg.fg;
+      state.contextWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return 'skipped-not-claude';
+    }
+
+    // Increment + schedule BEFORE the send so a failed send still consumes the slot. The
+    // wait here is the compaction timeout, not a retry delay: the next tick that matters is
+    // the one where compaction has either finished (isWorking false, row gone) or never
+    // started at all.
+    state.contextAttempts++;
+    state._contextCompactSentAt = Date.now();
+    state._contextCompactDeadline = Date.now() + (contextLimit.compactTimeoutSeconds * 1000);
+    state.contextWaitUntil = Date.now() + (contextLimit.retryDelaySeconds * 1000);
+    state._contextMatch = still.line;
+    await tmuxAdapter.sendKeys(pane, contextLimit.compactCommand);
+    return 'context-compacting';
+  }
+
+  // --- monitoring ---
+  // Usage-limit (hours-scale reset) takes precedence over overload (seconds-scale). No
+  // !isWorking gate here: it would widen every WORKING_PATTERN from "skip one injection" to
+  // "never detect the limit at all", and those patterns are NOT all live-only — `Retrying
+  // in …`/`attempt N/M` match transcript text (a flaky deploy/test log), so a stuck session
+  // with such a line lingering would never be retried. The waiting branch's `|| isWorking`
+  // guard already stops injection into a working session, which is enough to prevent the
+  // background-agent spam; the cost of dropping the gate is only a cosmetic re-detection
+  // cycle (detect → wait → user-continued) that never actually injects.
+  if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
+    return enterUsageWait(state, stripped, config);
+  }
+
+  // Recovery closes an event-path overload incident. That path returns to monitoring
+  // right after its send (edge-triggered), so a later working pane with backoff history
+  // still on the state is the only recovery signal it ever gets — without this reset the
+  // counters leak across fully-recovered incidents: escalated backoffs for unrelated
+  // failures days apart, and eventually every fresh marker consumed as overload-gave-up
+  // at the total-wait cap, permanently. Mirrors the scraper path's 'overload-cleared'.
+  // Two carve-outs (both real regressions caught in review): (1) an in-flight internal
+  // retry ("Retrying in 5s · attempt 3/10") satisfies isWorking but means the turn is
+  // STILL FAILING — resetting on it re-zeroes the budget every cycle of a sustained
+  // outage and the give-up cap never trips; (2) the same-banner memo must survive the
+  // reset — the banner this memo suppresses can still be on screen, and clearing it lets
+  // the scraper re-fire and inject into the recovered session. The memo has its own
+  // lifecycle (cleared below once the banner leaves the tail).
+  if ((state.overloadAttempts > 0 || state.overloadTotalWaitMs > 0)
+      && isWorking(stripped) && !isInternalRetry(stripped)) {
+    const handledBanner = state._eventHandledBanner;
+    resetOverload(state);
+    state._eventHandledBanner = handledBanner;
+  }
+
+  // Event-driven overload (authoritative and faster; see DESIGN-NOTES §1). A StopFailure
+  // marker for this pane means the turn ended in a retryable API error — no scraping, no
+  // ambiguity. It runs first, but does NOT replace the scraper below: the event path only
+  // covers overloaded/server_error, so a transient render the hook can't emit (an API 429,
+  // "temporarily limiting requests") is still caught by the scraper.
+  if (overload && overload.enabled && tmuxAdapter.readEvent) {
+    const ev = await tmuxAdapter.readEvent();
+    if (ev) {
+      // Consume-side guard: trust no writer. The hook entry in settings.json freezes the
+      // cli.js path + matcher at install time, so an OLDER hook binary (whose matcher and
+      // RETRYABLE set still include rate_limit) can keep writing markers after an upgrade.
+      // Consume-and-ignore anything non-retryable — a misclassified marker must not start a
+      // backoff (the scraper below still gets its normal shot on the next tick).
+      if (!isRetryableError(ev.error)) {
+        await tmuxAdapter.clearEvent();             // consume so it can't re-fire
+        state._ignoredEventError = ev.error;
+        return 'event-ignored';
+      }
+      await tmuxAdapter.clearEvent();               // consume
+      if (isWorking(stripped)) { resetOverload(state); return 'overload-cleared'; } // self-recovered
+      // Incident boundary: a genuinely failing retry turn re-fails within minutes (even
+      // through Claude's internal attempt N/10 backoff), so a marker arriving long after
+      // our last event-path send means that retry SUCCEEDED and this is a new incident —
+      // fresh backoff budget. The working-tick reset above can miss short responses
+      // entirely at a 30s poll; this gap check is the reliable close, and it also
+      // un-wedges a capped (gave-up) state weeks later without ever observing work.
+      if (state._lastEventRetryAt && Date.now() - state._lastEventRetryAt > OVERLOAD_INCIDENT_GAP_MS) {
+        resetOverload(state);
+      }
+      const capMs = overload.maxTotalWaitMinutes * 60_000;
+      if (state.overloadTotalWaitMs >= capMs) { state._gaveUp = true; return 'overload-gave-up'; }
+      const w = nextOverloadWaitMs(state.overloadAttempts, overload, rand);
+      state.overloadTotalWaitMs += w;
+      state.overloadWaitUntil = Date.now() + w;
+      state.status = 'overload';
+      state.viaEvent = true;
+      state._overloadMatch = { pattern: 'StopFailure', line: `error=${ev.error}` };
+      return 'overload-detected';
+    }
+  }
+
+  // Scraper safety net. Runs on every monitoring tick, even when the hook is live: the
+  // event path can't emit some terminal renders (an API 429, "temporarily limiting
+  // requests"), and the anchored overload patterns can't misfire on a session/usage limit
+  // (no "API Error" line). Already isWorking-gated + raw-distance-bounded, so it won't
+  // re-fire on a recovered/scrolled overload; and while a backoff is active (status ===
+  // 'overload') the tick returns above before reaching here.
+  if (overload && overload.enabled && !isWorking(stripped)) {
+    const match = overloadMatch(stripped, overload.patterns);
+    if (match) {
+      // Don't re-fire on the same banner the event path just retried and that hasn't
+      // cleared — that incident is owned by the (edge-triggered) event path until the render
+      // changes or a fresh marker arrives. Otherwise the always-on scraper opens a second
+      // backoff (extra injection + resetOverload defeats the give-up cap).
+      if (state._eventHandledBanner === `${match.pattern} ${match.line}`) return 'monitoring';
+      state._overloadMatch = match;  // surfaced in the 'overload-detected' log line
+      return enterOverload(state, overload, rand);
+    }
+    state._eventHandledBanner = null;  // banner gone → a future match is a fresh incident
+  }
+
+  // Safeguard/AUP false-positive: enter a bounded, seconds-scale retry loop. Independent
+  // of the overload path (different render, different recovery). Only when Claude is idle.
+  const safeguard = config.safeguard;
+  if (safeguard && safeguard.enabled && !isWorking(stripped)) {
+    const match = safeguardMatch(stripped, safeguard.patterns);
+    if (match) {
+      resetSafeguard(state);
+      state.status = 'safeguard';
+      state.safeguardWaitUntil = Date.now() + (safeguard.retryDelaySeconds * 1000);
+      state._safeguardMatch = match;
+      return 'safeguard-detected';
+    }
+  }
+
+  // Context limit. Last of the idle-only families, and deliberately so: its remedy is the
+  // only one that rewrites the conversation, so every family whose render might co-occur gets
+  // first refusal on the pane. Detection only arms the machine — the /compact goes out from
+  // the branch above, one tick later, after a second look at an idle pane.
+  const contextLimit = config.contextLimit;
+  if (contextLimit && contextLimit.enabled && !isWorking(stripped)) {
+    const match = contextLimitMatch(stripped);
+    if (match) {
+      resetContext(state);
+      state.status = 'context';
+      state.contextWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000);
+      state._contextMatch = match.line;
+      state._contextActionable = match.actionable;
+      return 'context-detected';
+    }
+  }
+
+  return 'monitoring';
+}
+
+export async function startMonitor(pane, pid) {
+  const config = await loadConfig();
+  const logger = createLogger();
+  const state = createMonitorState();
+  let consecutiveErrors = 0;
+  const MAX_CONSECUTIVE_ERRORS = 10;
+
+  await logger.info(`Monitor started for pane ${pane} (claude PID: ${pid})`);
+
+  // Best-effort GC of status files left behind by monitors that died without cleaning up
+  // (SIGKILL, host sleep/crash). Runs once per monitor start, not per tick.
+  sweepStaleStatus().catch(() => {});
+
+  let shuttingDown = false;
+  const shutdown = (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // Best-effort: fire the unlink and exit without waiting on the promise. Signal
+    // handlers are not the place to await — a hung filesystem must not block the
+    // process from actually terminating on SIGTERM/SIGINT.
+    clearStatus(pane).catch(() => {}).finally(() => {
+      process.exit(signal === 'SIGINT' ? 130 : 143);
+    });
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  const eventMaxAgeMs = (config.overload?.eventMaxAgeSeconds || 120) * 1000;
+  const tmuxAdapter = {
+    capturePane, sendKeys, sendKey, getPaneCommand,
+    isClaudeForeground: () => isProcessForeground(pid),
+    // Pane-keyed StopFailure markers (written by the hook). The daemon owns the pane,
+    // so this is a direct read — no session-id resolution needed.
+    // Read at send time, not cached here, so editing the override applies without a restart.
+    readSessionPrompt: () => readSessionPrompt(pane, pid),
+    readEvent: () => readStopFailureEvent(pane, eventMaxAgeMs),
+    clearEvent: () => clearStopFailureEvent(pane),
+  };
+  const isAlive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+  const loop = async () => {
+    try {
+      const result = await processOneTick(state, tmuxAdapter, pane, config, isAlive);
+      consecutiveErrors = 0;
+
+      if (result === 'exit') {
+        await clearStatus(pane).catch(() => {});
+        await logger.info('Claude exited. Monitor shutting down.');
+        process.exit(0);
+      }
+
+      // Published for external consumers (e.g. a tmux status-bar segment) — best-effort,
+      // never let a write failure interrupt the monitor loop. pollIntervalSeconds travels
+      // with every snapshot so the reader can derive its own staleness threshold instead
+      // of assuming a fixed interval (a configured pollIntervalSeconds far above the old
+      // hardcoded 30s stale-check would otherwise make a healthy monitor's segment blank
+      // out for a large fraction of every tick). gaveUp flags the terminal states where
+      // `status` alone doesn't tell a reader the monitor has stopped acting.
+      await writeStatus(pane, {
+        status: state.status,
+        waitUntil: Math.floor(state.waitUntil / 1000),
+        overloadWaitUntil: Math.floor(state.overloadWaitUntil / 1000),
+        safeguardWaitUntil: Math.floor(state.safeguardWaitUntil / 1000),
+        contextWaitUntil: Math.floor(state.contextWaitUntil / 1000),
+        attempts: state.attempts,
+        overloadAttempts: state.overloadAttempts,
+        safeguardAttempts: state.safeguardAttempts,
+        contextAttempts: state.contextAttempts,
+        pollIntervalSeconds: config.pollIntervalSeconds,
+        gaveUp: !!state._gaveUp,
+      }).catch(() => {});
+      // The three results that announce a new wake-up time share one shape: seconds until
+      // waitUntil, then consume the one-shot lastRateLimitMessage. Set-with-clear is an
+      // invariant — a message left behind logs as a spurious detection on a later tick.
+      const logWait = (line) => {
+        const secs = Math.round((state.waitUntil - Date.now()) / 1000);
+        const msg = state.lastRateLimitMessage;
+        state.lastRateLimitMessage = null;
+        return logger.info(line(secs, msg));
+      };
+      if (result === 'waiting' && state.lastRateLimitMessage) {
+        await logWait((secs, msg) => `Rate limit detected: "${msg}". Waiting ${secs}s...`);
+      }
+      if (result === 'menu-confirmed') {
+        await logWait((secs) => `Rate-limit options menu: selected "Stop and wait for limit to reset". Waiting ${secs}s...`);
+      }
+      if (result === 'wait-corrected') {
+        await logWait((secs, msg) => `Reset time re-read from the live banner: "${msg}". Wait shortened to ${secs}s.`);
+      }
+      if (result === 'menu-unreadable') await logger.warn('Rate-limit options menu detected but its layout could not be read; not pressing Enter (would risk confirming "Upgrade your plan"). Will recheck.');
+      if (result === 'retried') await logger.info(`Sent retry message (attempt ${state.attempts})`);
+      if (result === 'user-continued') await logger.info('User already continued. Attempt counter reset.');
+      if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
+      if (result === 'skipped-not-claude') await logger.warn(`Foreground is "${state._lastForeground}", not Claude. Skipping send-keys. (Add to foregroundCommands in ~/.claude-auto-retry.json if this is wrong)`);
+      if (result === 'event-ignored') await logger.warn(`Ignored StopFailure marker with non-retryable error="${state._ignoredEventError}". If this is "rate_limit", an outdated hook is installed — re-run "claude-auto-retry install-hook".`);
+      if (result === 'overload-detected') {
+        const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
+        const m = state._overloadMatch;
+        const why = m ? ` [matched /${m.pattern}/ in: "${m.line}"]` : '';
+        await logger.warn(`Overload/transient API error detected (sustained)${why}. Backing off ${secs}s before retry. NOTE: Claude Code retries 5xx/529 internally — this only fires on terminal overload.`);
+      }
+      if (result === 'overload-retried') {
+        const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
+        await logger.info(`Overload retry sent (attempt ${state.overloadAttempts}). Next backoff ${secs}s. Cumulative wait ${Math.round(state.overloadTotalWaitMs / 1000)}s.`);
+      }
+      if (result === 'overload-working') await logger.info('Overload text present but Claude is working (internal retry/streaming). Deferring — not terminal.');
+      if (result === 'overload-cleared') await logger.info('Overload cleared. Resuming normal monitoring.');
+      if (result === 'overload-relaunched') await logger.warn(`Claude exited to shell on overload; relaunched via "${config.overload.relaunchCommand}" (relaunchOnExit on, attempt ${state.overloadAttempts}).`);
+      if (result === 'overload-exited-to-shell') await logger.warn(`Overload error left claude exited to the shell ("${state._lastForeground}"). Not auto-relaunching (relaunchOnExit off). Re-run "claude --continue" to resume, or set overload.relaunchOnExit:true.`);
+      if (result === 'overload-gave-up') await logger.warn(`Overload backoff cap reached (maxTotalWaitMinutes=${config.overload.maxTotalWaitMinutes}). Giving up — endpoint may be genuinely down (check status.claude.com). Will not retry until the error clears.`);
+      if (result === 'safeguard-detected') {
+        const m = state._safeguardMatch;
+        await logger.warn(`Safeguard/AUP flag detected${m ? ` [matched /${m.pattern}/ in: "${m.line}"]` : ''} — often a false positive. Will retry up to ${config.safeguard.maxRetries}x every ${config.safeguard.retryDelaySeconds}s.`);
+      }
+      if (result === 'safeguard-retried') await logger.info(`Safeguard retry sent (attempt ${state.safeguardAttempts}/${config.safeguard.maxRetries}).`);
+      if (result === 'safeguard-cleared') await logger.info('Safeguard flag cleared. Resuming normal monitoring.');
+      if (result === 'safeguard-gave-up') await logger.warn(`Safeguard flag persisted after ${config.safeguard.maxRetries} retries. Giving up — the flag is likely sticky for this content/model; try /model to switch models or rephrase. Will not retry until it clears.`);
+      if (result === 'context-detected') {
+        await logger.warn(`Context limit reached at an idle prompt ("${state._contextMatch}"). `
+          + (state._contextActionable
+            ? `Will send "${config.contextLimit.compactCommand}" and resume once the conversation is compacted (up to ${config.contextLimit.maxRetries}x).`
+            : 'Compaction is unavailable (the row only offers /clear) — standing down; clearing the conversation is not something this monitor will do on its own.'));
+      }
+      if (result === 'context-compacting') await logger.info(`Sent "${config.contextLimit.compactCommand}" (attempt ${state.contextAttempts}/${config.contextLimit.maxRetries}). Waiting up to ${config.contextLimit.compactTimeoutSeconds}s for the compaction to finish.`);
+      if (result === 'context-working') await logger.info('Compaction (or other work) in flight. Deferring without consuming an attempt.');
+      if (result === 'context-resumed') await logger.info(`Conversation compacted; context-limit row cleared. Sent the continuation message to pick the work back up.`);
+      if (result === 'context-cleared') await logger.info('Context-limit row cleared without us acting (auto-compact, or the user). Resuming normal monitoring.');
+      if (result === 'context-clear-only') await logger.warn(`Context limit reached but compaction is disabled (the row offers only /clear): "${state._contextMatch}". Not clearing — that would discard the conversation. Run /compact yourself, or unset DISABLE_COMPACT.`);
+      if (result === 'context-gave-up') await logger.warn(`Context-limit row survived ${config.contextLimit.maxRetries} compaction attempt(s). Giving up — check the pane for a "compact failed" line (a PreCompact hook, or a single exchange too large to summarise). Will not retry until it clears.`);
+    } catch (err) {
+      consecutiveErrors++;
+      await logger.error(`Monitor tick error: ${err.message}`).catch(() => {});
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        await clearStatus(pane).catch(() => {});
+        await logger.error(`${MAX_CONSECUTIVE_ERRORS} consecutive errors. Pane likely destroyed. Exiting.`).catch(() => {});
+        process.exit(1);
+      }
+    }
+  };
+
+  // Use recursive setTimeout instead of setInterval to prevent concurrent
+  // tick execution when a tick takes longer than the poll interval.
+  const scheduleNext = () => {
+    setTimeout(async () => {
+      await loop();
+      scheduleNext();
+    }, config.pollIntervalSeconds * 1000);
+  };
+  loop().then(scheduleNext);
+}
+
+// Direct execution: node monitor.js <pane> <pid>
+const isDirectRun = process.argv[1]?.endsWith('monitor.js') && process.argv.length >= 4;
+if (isDirectRun) {
+  startMonitor(process.argv[2], parseInt(process.argv[3], 10));
+}

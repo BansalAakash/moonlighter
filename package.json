@@ -1,0 +1,45 @@
+{
+  "name": "claude-auto-retry",
+  "version": "0.7.3",
+  "description": "Keep Claude Code working while you're away: auto-resume after usage limits, auto-/compact when the context window fills, and a macOS menu bar app to watch it all.",
+  "type": "module",
+  "bin": {
+    "claude-auto-retry": "./bin/cli.js",
+    "claude-auto-retry-tmux-status": "./bin/tmux-status.sh"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "rate-limit",
+    "retry",
+    "tmux",
+    "anthropic",
+    "context-limit",
+    "compact",
+    "menubar",
+    "macos"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BansalAakash/moonlighter"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "systemd/",
+    "launchd/",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    "llms.txt",
+    "install.sh"
+  ],
+  "homepage": "https://github.com/BansalAakash/moonlighter"
+}
