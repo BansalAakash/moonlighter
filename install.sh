@@ -62,6 +62,27 @@ else
     echo "  It installs its own 5-minute repair timer and asks to open at login."
 fi
 
+# --- sleep check --------------------------------------------------------------
+#
+# The single most common reason an overnight run does nothing: the Mac was asleep.
+# Reported rather than changed — power settings belong to the user, not an installer.
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    echo
+    say "Checking sleep settings"
+    SLEEP_MIN=$(pmset -g custom 2>/dev/null | awk '/^ sleep /{print $2; exit}')
+    if [ -n "${SLEEP_MIN:-}" ] && [ "$SLEEP_MIN" != "0" ]; then
+        warn "  This Mac sleeps after ${SLEEP_MIN} minutes idle — usually long before a limit resets."
+        warn "  To keep it awake while a session runs, add to your ~/.zshrc:"
+        warn "      export CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER=\"caffeinate -i\""
+        warn "  Also: stay on the charger, and leave the lid open (closing it sleeps"
+        warn "  Apple Silicon laptops regardless of caffeinate)."
+    else
+        echo "  Idle sleep is off. Good."
+    fi
+fi
+
 echo
 say "Done."
 echo "Open a new terminal (or: source ~/.zshrc), then use \`claude\` as you always do."
+echo "Overnight runs: see \"Leaving it running overnight\" in the README."

@@ -62,6 +62,55 @@ claude-auto-retry logs       # what has happened today
 
 To stop using it, `claude-auto-retry uninstall` removes the shell function.
 
+## Leaving it running overnight
+
+The tool can only resume a session on a machine that is **awake**. This is the part that
+catches people out, so it is worth two minutes.
+
+**Keep the Mac awake.** Add this to your `~/.zshrc` — every session then holds the machine
+awake for as long as it runs, and stops holding it the moment it exits:
+
+```bash
+export CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER="caffeinate -i"
+```
+
+Check what your Mac would otherwise do:
+
+```bash
+pmset -g custom | grep -w sleep      # minutes of idle before it sleeps; 0 means never
+```
+
+A default MacBook sleeps after 15 minutes idle **even on the charger**, which is long
+before a limit resets.
+
+**Also worth doing:**
+
+- **Plug in the charger.** On battery, macOS sleeps more aggressively, and Low Power Mode
+  throttles background work.
+- **Leave the lid open.** On Apple Silicon laptops, closing the lid sleeps the machine even
+  on power, and `caffeinate` will *not* prevent it — it only blocks *idle* sleep. The one
+  exception is clamshell mode with an external display connected.
+- **Stay on a network that doesn't drop.** Claude Code needs it; the monitor doesn't.
+
+**You do *not* need to keep the terminal window open.** Sessions run inside tmux, detached
+from whatever launched them. Close the window, lock the screen, log out of the terminal app
+— the work continues. Reattach later with `claude-auto-retry status` to find the session.
+
+**And if it does sleep anyway, nothing is lost.** The wait is a wall-clock deadline, not a
+countdown, so a sleeping Mac just delays the retry until it wakes. You get the work done
+late rather than not at all.
+
+### When nothing happens
+
+| What you see | Why | Fix |
+|---|---|---|
+| `status` lists no sessions | Claude wasn't launched through the wrapper — you were already inside tmux, or used `CLAUDE_AUTO_RETRY_NO_TMUX=1`, or started it from an IDE terminal | Launch with `claude` from a normal shell |
+| Worked yesterday, not today | You switched Node versions. The shell wrapper and the repair timer both pin an absolute Node path | Re-run `./install.sh` |
+| One session is skipped, others work | Its auto-resume checkmark is off in the menu bar app | Click it back on |
+| Claude is stopped but never resumes | It's waiting on a **permission prompt**, not a limit. No retry message can clear that | Run unattended sessions in a mode that doesn't stop to ask |
+| Everything vanished | The Mac rebooted — a macOS update, or a crash. tmux sessions do not survive a reboot, and with FileVault on, nothing runs at all until someone logs in | Nothing to recover; the menu bar app returns at login |
+| Waiting for days, not hours | You hit a **weekly** cap rather than the 5-hour one | It will still wait it out |
+
 ## The menu bar app <sub>(macOS)</sub>
 
 A small icon in your status bar, so you never have to wonder whether the thing is
