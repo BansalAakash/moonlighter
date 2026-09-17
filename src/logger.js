@@ -7,12 +7,27 @@ const MAX_AGE_DAYS = 7;
 const CLEANUP_INTERVAL_MS = 3600_000;
 let lastCleanup = 0;
 
+// Local time, not UTC: toISOString() is UTC, and stripping its "Z" left every log line
+// looking like local time while actually running hours ahead/behind it — on IST (UTC+5:30)
+// a "14:25" entry was really 19:55, which reads as a wait/retry computed hours wrong when
+// it was not. pad() only needs 2 digits: every field here is a calendar/clock value < 100.
+function pad(n) { return String(n).padStart(2, '0'); }
+
+function localParts(d) {
+  return {
+    y: d.getFullYear(), mo: pad(d.getMonth() + 1), day: pad(d.getDate()),
+    h: pad(d.getHours()), mi: pad(d.getMinutes()), s: pad(d.getSeconds()),
+  };
+}
+
 function timestamp() {
-  return new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+  const { y, mo, day, h, mi, s } = localParts(new Date());
+  return `${y}-${mo}-${day} ${h}:${mi}:${s}`;
 }
 
 function todayFile(dir) {
-  return join(dir, `${new Date().toISOString().split('T')[0]}.log`);
+  const { y, mo, day } = localParts(new Date());
+  return join(dir, `${y}-${mo}-${day}.log`);
 }
 
 async function cleanup(dir) {

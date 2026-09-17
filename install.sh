@@ -60,6 +60,23 @@ else
     open -a /Applications/AutoRetryBar.app
     echo "  Installed to /Applications and launched."
     echo "  It installs its own 5-minute repair timer and asks to open at login."
+
+    # Watchdog: relaunches AutoRetryBar if it's not running, and force-restarts it if it's
+    # running but its heartbeat has stopped (stuck, not crashed — a plain pgrep or launchd
+    # KeepAlive can't see that). A LaunchAgent rather than a login item so it comes back after
+    # a reboot on its own, independent of macOS's Login Items list.
+    WATCHDOG_SCRIPT="$(pwd)/menubar/Scripts/watchdog.sh"
+    WATCHDOG_PLIST="$HOME/Library/LaunchAgents/com.moonlighter.autoretrybar.watchdog.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    sed "s#__SCRIPT_PATH__#${WATCHDOG_SCRIPT}#" \
+        menubar/launchd/com.moonlighter.autoretrybar.watchdog.plist > "$WATCHDOG_PLIST"
+    launchctl bootout "gui/$(id -u)/com.moonlighter.autoretrybar.watchdog" 2>/dev/null || true
+    if launchctl bootstrap "gui/$(id -u)" "$WATCHDOG_PLIST" 2>/dev/null; then
+        echo "  Watchdog installed: checks every 60s that the menu bar app is actually alive."
+    else
+        warn "  Watchdog plist written but failed to load. Load manually:"
+        warn "      launchctl bootstrap gui/$(id -u) $WATCHDOG_PLIST"
+    fi
 fi
 
 # --- sleep check --------------------------------------------------------------

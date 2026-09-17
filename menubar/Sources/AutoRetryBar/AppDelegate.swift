@@ -55,6 +55,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// costs a reconcile --dry-run, so the 5-second bar refresh does without it and only the
     /// menu (which has to offer their toggle) pays for it.
     private func refresh(full: Bool = false) {
+        // Proof the refresh loop is actually alive, not just the process — a hung main
+        // thread or a Timer that stopped firing leaves the app running (so pgrep and
+        // launchd both see it as healthy) while the menu quietly goes stale forever. The
+        // watchdog LaunchAgent kills and relaunches the app if this file stops moving.
+        Snapshot.writeHeartbeat()
         sessions = full ? Snapshot.loadFull() : Snapshot.load()
         guard let button = statusItem?.button else { return }
 

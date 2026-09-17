@@ -223,6 +223,15 @@ enum Snapshot {
     static var statusDir: URL { home.appending(path: ".claude-auto-retry/status") }
     static var logsDir: URL { home.appending(path: ".claude-auto-retry/logs") }
     static var configFile: URL { home.appending(path: ".claude-auto-retry.json") }
+    static var heartbeatFile: URL { home.appending(path: ".claude-auto-retry/menubar-heartbeat") }
+
+    /// Called once per refresh tick. The watchdog LaunchAgent (menubar/launchd) reads this
+    /// file's mtime; anything older than a few missed ticks means the app is running but not
+    /// actually doing anything, and gets killed and relaunched.
+    static func writeHeartbeat() {
+        let epoch = "\(Int(Date().timeIntervalSince1970))"
+        try? epoch.write(to: heartbeatFile, atomically: true, encoding: .utf8)
+    }
 
     /// Status filenames are "<sanitized socket>_<sanitized pane>.json" (src/pane-key.js
     /// replaces every character outside [A-Za-z0-9_-] with "_"). Sanitizing is lossy, so the
