@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption } from '../src/patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, isInputBoxEmpty, findSessionResetLine } from '../src/patterns.js';
 
 const MENU_UPGRADE_FIRST = [
   "You've hit your session limit · resets 6:50pm (Europe/London)",
@@ -1040,5 +1040,66 @@ describe('stripAnsi (OSC sequences)', () => {
   it('rate limit detection works through OSC hyperlinks', () => {
     const input = '\x1b]8;;link\x1b\\5-hour limit reached\x1b]8;;\x1b\\ - resets 3pm';
     assert.ok(isRateLimited(input));
+  });
+});
+
+// The gate for the /status probe (monitor.js's probeSessionReset): it must never type into
+// the pane while the user has an unsent, in-progress prompt sitting in the input box.
+describe('isInputBoxEmpty', () => {
+  const footer = [
+    '─'.repeat(40),
+    '❯ ',
+    '─'.repeat(40),
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent',
+  ].join('\n');
+
+  it('true for a bare empty prompt row', () => {
+    assert.equal(isInputBoxEmpty(footer), true);
+  });
+  it('true for a bare ">" prompt row', () => {
+    assert.equal(isInputBoxEmpty(footer.replace('❯ ', '> ')), true);
+  });
+  it('false when the box has an in-progress prompt', () => {
+    assert.equal(isInputBoxEmpty(footer.replace('❯ ', '❯ fix the ')), false);
+  });
+  it('false (fail closed) when no prompt row is found at all', () => {
+    assert.equal(isInputBoxEmpty('✻ Cogitating… (esc to interrupt)\nsome transcript line'), false);
+  });
+  it('is not fooled by a quoted "❯" earlier in a long capture', () => {
+    const lines = Array.from({ length: 20 }, (_, i) => `transcript line ${i}`);
+    lines[3] = '❯ some quoted example from a doc';
+    const capture = [...lines, footer].join('\n');
+    assert.equal(isInputBoxEmpty(capture), true);
+  });
+});
+
+describe('findSessionResetLine', () => {
+  const usagePanel = [
+    '   Settings  Status   Config   Usage   Stats',
+    '',
+    '   Session',
+    '',
+    '   Total cost:            $0.0000',
+    '',
+    '   Current session',
+    '   █████████████████                                  34% used',
+    '   Resets 10:50pm (Asia/Calcutta)',
+    '',
+    '   Current week (all models)',
+    '   ████████████████████████████▉                      58% used',
+    '   Resets Sep 19 at 6:30am (Asia/Calcutta)',
+    '',
+    '   Esc to cancel',
+  ].join('\n');
+
+  it('reads the "Current session" reset row, not the weekly one', () => {
+    assert.equal(findSessionResetLine(usagePanel), 'Resets 10:50pm (Asia/Calcutta)');
+  });
+  it('returns null when the panel is not showing (e.g. still on the Status tab)', () => {
+    assert.equal(findSessionResetLine('Version: 2.1.276\nSession ID: abc\nEsc to cancel'), null);
+  });
+  it('returns null when "Current session" is present but no reset row follows within range', () => {
+    const noReset = ['Current session', 'not a reset line', '', '', '', '', 'Current week'].join('\n');
+    assert.equal(findSessionResetLine(noReset), null);
   });
 });

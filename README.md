@@ -117,6 +117,14 @@ A small icon in your status bar, so you never have to wonder whether the thing i
 working. It shows a countdown while a session is waiting out a limit, and turns red if
 one needs you.
 
+With `sessionResetCheck.enabled` on (see below), the countdown doesn't disappear the rest
+of the time either: while a session is otherwise idle, the monitor occasionally opens
+Claude Code's own `/status` → Usage panel to read the reset time, then closes it again —
+so the icon can show "time until reset" continuously, not only once something has already
+gone wrong. Off by default because it types into the pane on a timer during normal
+operation; it only ever does this when the input box is confirmed empty and Claude isn't
+mid-response.
+
 Clicking it gives you the whole app in about six lines:
 
 ```
@@ -182,6 +190,8 @@ process id, so they expire with the session and can never be sent to a later one
 | `pollIntervalSeconds` | `5` | How often each pane is checked |
 | `marginSeconds` | `60` | Extra wait after the stated reset time |
 | `retryMessage` | `"Continue…"` | Sent on **API overload** only, not usage limits |
+| `sessionResetCheck.enabled` | `false` | Passive `/status` check for the always-on menu bar countdown |
+| `sessionResetCheck.intervalMinutes` | `10` | How often an idle session gets checked |
 
 All keys are optional and invalid values fall back to defaults.
 [`docs/reference.md`](docs/reference.md) documents the rest.

@@ -58,6 +58,7 @@ if CommandLine.arguments.contains("--dump") {
             status   : \(s.status.status)   live: \(s.isLive)   stale: \(s.isStale)   gaveUp: \(s.status.gaveUp ?? false)
             claude   : \(s.claudePid.map(String.init) ?? "-")   monitor: \(s.monitorPid.map(String.init) ?? "-")
             deadline : \(s.deadline.map { "in \(Session.short($0))" } ?? "-")
+            session resets : \(s.sessionResetDeadline.map { "in \(Session.short($0))" } ?? "-")
             prompt   : \(SessionPrompt.file(for: s)?.path ?? "-")\(SessionPrompt.isCustom(for: s) ? "  [CUSTOM]" : "")
         """)
     }

@@ -1,4 +1,4 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, contextLimitMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, contextLimitMatch, isWorking, isInternalRetry, resumedAfterLimit, isInputBoxEmpty, findSessionResetLine } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
@@ -37,6 +37,9 @@ export function createMonitorState() {
     // families don't: _contextCompactedAt marks that a /compact was sent and the row has
     // since cleared, which is what licenses the follow-up continuation send.
     contextAttempts: 0, contextWaitUntil: 0, _contextCompactSentAt: 0,
+    // Best-known reset time for the CURRENT session window, learned passively via
+    // probeSessionReset while otherwise idle — not tied to an active wait. 0 = unknown yet.
+    sessionResetAt: 0,
   };
 }
 
@@ -162,6 +165,31 @@ function correctUsageWait(state, stripped, config) {
   return message;
 }
 
+// Learn the current session's reset time without needing to actually hit the limit, by
+// briefly opening Claude Code's own /status → Usage panel and reading it off the screen.
+// Only ever called when the pane has already been confirmed idle with an empty input box
+// (see the call site) — this types real keystrokes into the user's session, so it must never
+// run over an in-progress prompt. /status is a client-side command (it doesn't touch the
+// API or spend any usage), and Escape at the end always returns the pane to a bare prompt,
+// success or not.
+async function probeSessionReset(tmuxAdapter, pane, config) {
+  await tmuxAdapter.sendKeys(pane, '/status');
+  await new Promise((r) => setTimeout(r, 400));
+  for (let i = 0; i < 3; i++) {
+    await tmuxAdapter.sendKey(pane, 'Right');
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  await new Promise((r) => setTimeout(r, 350));
+  const raw = await tmuxAdapter.capturePane(pane, 60);
+  await tmuxAdapter.sendKey(pane, 'Escape');
+
+  const line = findSessionResetLine(raw);
+  if (!line) return null;
+  const parsed = parseResetTime(line);
+  if (!parsed) return null;
+  return Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
+}
+
 function enterOverload(state, overload, rand) {
   const capMs = overload.maxTotalWaitMinutes * 60_000;
   resetOverload(state);
@@ -285,6 +313,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       }
       state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
       state._waitIsFallback = false;
+      // The window that just ended is stale info now that a new one has started —
+      // due immediately instead of waiting out the normal interval, so the menu bar's
+      // countdown picks up the new reset time on the next idle tick rather than showing
+      // the old (now-meaningless) one for another ~10 minutes.
+      state._lastUsageCheckAt = 0;
       return 'user-continued';
     }
 
@@ -710,6 +743,28 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     }
   }
 
+  // Reached only when nothing else this tick found anything to do — genuinely idle. A good,
+  // infrequent moment to learn the reset time for the menu bar's always-on countdown (see
+  // probeSessionReset). Off unless explicitly enabled (see DEFAULT_SESSION_RESET_CHECK); when
+  // on, gated tightly because this types into the user's live session: not working, not
+  // mid-prompt, and Claude actually in the foreground.
+  const resetCheck = config.sessionResetCheck;
+  if (resetCheck && resetCheck.enabled) {
+    const intervalMs = (resetCheck.intervalMinutes || 10) * 60_000;
+    const dueForCheck = Date.now() - (state._lastUsageCheckAt || 0) > intervalMs;
+    if (dueForCheck && !isWorking(stripped) && isInputBoxEmpty(stripped)) {
+      const fgOk = await checkForeground(tmuxAdapter, pane, config);
+      if (fgOk.ok && isAlive()) {
+        state._lastUsageCheckAt = Date.now();
+        const resetAt = await probeSessionReset(tmuxAdapter, pane, config);
+        if (resetAt) {
+          state.sessionResetAt = resetAt;
+          return 'session-reset-learned';
+        }
+      }
+    }
+  }
+
   return 'monitoring';
 }
 
@@ -777,6 +832,7 @@ export async function startMonitor(pane, pid) {
         overloadWaitUntil: Math.floor(state.overloadWaitUntil / 1000),
         safeguardWaitUntil: Math.floor(state.safeguardWaitUntil / 1000),
         contextWaitUntil: Math.floor(state.contextWaitUntil / 1000),
+        sessionResetAt: Math.floor(state.sessionResetAt / 1000),
         attempts: state.attempts,
         overloadAttempts: state.overloadAttempts,
         safeguardAttempts: state.safeguardAttempts,
@@ -810,6 +866,10 @@ export async function startMonitor(pane, pid) {
           await logger.warn(`(diagnostic) "already continued" fired seconds into a multi-hour wait — pane tail at the time:\n${state._debugSnippet}`);
           state._debugSnippet = null;
         }
+      }
+      if (result === 'session-reset-learned') {
+        const secs = Math.round((state.sessionResetAt - Date.now()) / 1000);
+        await logger.info(`Checked /status while idle — session resets in ${secs}s.`);
       }
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
       if (result === 'skipped-not-claude') await logger.warn(`Foreground is "${state._lastForeground}", not Claude. Skipping send-keys. (Add to foregroundCommands in ~/.claude-auto-retry.json if this is wrong)`);

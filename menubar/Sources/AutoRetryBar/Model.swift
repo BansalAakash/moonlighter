@@ -22,6 +22,7 @@ struct PaneStatus: Decodable {
     var contextAttempts: Int?
     var pollIntervalSeconds: Int?
     var gaveUp: Bool?
+    var sessionResetAt: Int?
     var updatedAt: Int
 }
 
@@ -74,6 +75,18 @@ struct Session {
         return d > Date() ? d : nil
     }
 
+    /// Best-known reset time for the CURRENT session window, learned passively by the
+    /// monitor's /status probe while otherwise idle (opt-in — see DEFAULT_SESSION_RESET_CHECK
+    /// in config.js) — NOT tied to an active wait. Distinct from `deadline`: that one only
+    /// exists while something has actually gone wrong; this one is meant to be there all the
+    /// time, which is the whole point of it. nil until the monitor's first idle probe lands,
+    /// or if the feature isn't enabled.
+    var sessionResetDeadline: Date? {
+        guard let e = status.sessionResetAt, e > 0 else { return nil }
+        let d = Date(timeIntervalSince1970: TimeInterval(e))
+        return d > Date() ? d : nil
+    }
+
     enum Health { case waiting, working, attention, idle, dead, off }
 
     var health: Health {
@@ -104,7 +117,7 @@ struct Session {
         case "context":
             return "compacting, then resuming"
         default:
-            return "running"
+            return sessionResetDeadline.map { "resets in \(Self.short($0))" } ?? "running"
         }
     }
 

@@ -791,6 +791,41 @@ export function isInternalRetry(text) {
     .some((l) => INTERNAL_RETRY_PATTERNS.some((p) => p.test(l)));
 }
 
+// Is the input box empty right now? Used to gate the /status probe (see monitor.js's
+// checkSessionResetPanel): that probe types "/status" into the pane, so it must never fire
+// while the user has an in-progress, unsent prompt sitting in the box — that keystroke would
+// land in the middle of their text. Bare "❯" (or ">") with nothing after it is empty; the
+// same glyph with anything trailing it is not. Scoped to the last few lines (the box is
+// always at the bottom) so a quoted "❯" earlier in scrollback can't produce a false read in
+// either direction; no prompt row found at all is treated as NOT safe (fail closed).
+const EMPTY_PROMPT_ROW = /^\s*[❯>]\s*$/;
+const OCCUPIED_PROMPT_ROW = /^\s*[❯>]\s*\S/;
+const INPUT_BOX_SCAN_LINES = 8;
+export function isInputBoxEmpty(text) {
+  const lines = stripAnsi(text).split('\n');
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - INPUT_BOX_SCAN_LINES); i--) {
+    if (EMPTY_PROMPT_ROW.test(lines[i])) return true;
+    if (OCCUPIED_PROMPT_ROW.test(lines[i])) return false;
+  }
+  return false;
+}
+
+// Reads the "Current session … Resets <time>" row off the Usage tab of Claude Code's /status
+// panel (monitor.js drives Right/Right/Right to reach it, then captures). Scoped to the
+// "Current session" block specifically — the panel also prints a "Current week" reset a few
+// lines below in a shape parseResetTime doesn't handle ("Resets Sep 19 at 6:30am"), and
+// mixing the two up would report a weekly boundary as the session's.
+const RESET_ROW = /^\s*Resets\s+/i;
+export function findSessionResetLine(text) {
+  const lines = stripAnsi(text).split('\n');
+  const start = lines.findIndex((l) => /Current session\b/.test(l));
+  if (start === -1) return null;
+  for (let i = start + 1; i < Math.min(start + 5, lines.length); i++) {
+    if (RESET_ROW.test(lines[i])) return lines[i].trim();
+  }
+  return null;
+}
+
 // tailLines > 0 bounds the scan to the same chrome-aware window isRateLimited uses. The
 // unbounded scan reaches the FULL capture, so any non-chrome, non-echo line anywhere in
 // ~120 lines that merely *looks* like a reset ("…try again in 2 minutes…" in model prose,

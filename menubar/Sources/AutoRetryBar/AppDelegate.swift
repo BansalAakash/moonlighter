@@ -83,6 +83,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if let soonest = waiting.compactMap({ $0.deadline }).min() {
             image = Icon.normal
             label = Session.short(soonest)                // "3h12m"
+        } else if let soonest = live.compactMap({ $0.sessionResetDeadline }).min() {
+            // No active incident, but a passively-learned reset time is available (see
+            // sessionResetDeadline) — show it too. The whole point of that field is that the
+            // countdown doesn't disappear just because nothing is currently wrong.
+            image = Icon.normal
+            label = Session.short(soonest)
         } else if !live.isEmpty {
             image = Icon.normal
             label = live.count > 1 ? "\(live.count)" : ""

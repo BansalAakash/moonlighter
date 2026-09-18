@@ -95,6 +95,16 @@ export const DEFAULT_CONTEXT_LIMIT = {
   retryMessage: null,
 };
 
+// Passive /status probe (see monitor.js's probeSessionReset), for a menu-bar countdown to
+// the session's reset time even when nothing has gone wrong yet. Off by default: unlike the
+// families above, this types into the pane on a timer during completely normal operation
+// rather than only in response to something the pane already showed, so it opts in via
+// ~/.claude-auto-retry.json rather than applying to every install unasked.
+export const DEFAULT_SESSION_RESET_CHECK = {
+  enabled: false,
+  intervalMinutes: 10,
+};
+
 export const DEFAULT_CONFIG = {
   maxRetries: 5,
   pollIntervalSeconds: 5,
@@ -106,6 +116,7 @@ export const DEFAULT_CONFIG = {
   overload: DEFAULT_OVERLOAD,
   safeguard: DEFAULT_SAFEGUARD,
   contextLimit: DEFAULT_CONTEXT_LIMIT,
+  sessionResetCheck: DEFAULT_SESSION_RESET_CHECK,
 };
 
 const CONFIG_PATH = join(homedir(), '.claude-auto-retry.json');
