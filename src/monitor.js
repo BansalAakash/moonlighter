@@ -118,6 +118,9 @@ function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
   state.lastRateLimitMessage = message;
   state.waitUntil = until;
   state.status = 'waiting';
+  // For the false-"already continued" diagnostic in the waiting branch below: a genuine
+  // resume can't happen in the first few seconds of a wait that has hours left on it.
+  state._waitEnteredAt = Date.now();
   // Latch whether this wait is the fallback default rather than a real reset time. Only a
   // fallback stays open to correction (correctUsageWait), so a wait derived from a genuine
   // banner is never re-parsed — no window for stray reset-shaped text to move it, and none
@@ -270,6 +273,16 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // session (and a banner re-printed by another process keeps it "rate-limited" the
     // whole time). Resumed ⇒ the session continued; never inject into it.
     if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
+      // Diagnostic only, not a behavior change: a real resume can't happen seconds into a
+      // wait that has hours left on it — more likely a transient render (a compaction
+      // spinner, Claude's own internal-retry line) briefly matched a working pattern right
+      // after the banner appeared. Stash the tail so the log shows what actually triggered
+      // this instead of leaving it as unexplained as every prior occurrence.
+      const sinceEnteredMs = Date.now() - (state._waitEnteredAt || 0);
+      const remainingMs = state.waitUntil - Date.now();
+      if (sinceEnteredMs < 20_000 && remainingMs > 5 * 60_000) {
+        state._debugSnippet = stripped.split('\n').slice(-RATE_LIMIT_TAIL_LINES).join('\n');
+      }
       state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
       state._waitIsFallback = false;
       return 'user-continued';
@@ -791,7 +804,13 @@ export async function startMonitor(pane, pid) {
       }
       if (result === 'menu-unreadable') await logger.warn('Rate-limit options menu detected but its layout could not be read; not pressing Enter (would risk confirming "Upgrade your plan"). Will recheck.');
       if (result === 'retried') await logger.info(`Sent retry message (attempt ${state.attempts})`);
-      if (result === 'user-continued') await logger.info('User already continued. Attempt counter reset.');
+      if (result === 'user-continued') {
+        await logger.info('User already continued. Attempt counter reset.');
+        if (state._debugSnippet) {
+          await logger.warn(`(diagnostic) "already continued" fired seconds into a multi-hour wait — pane tail at the time:\n${state._debugSnippet}`);
+          state._debugSnippet = null;
+        }
+      }
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
       if (result === 'skipped-not-claude') await logger.warn(`Foreground is "${state._lastForeground}", not Claude. Skipping send-keys. (Add to foregroundCommands in ~/.claude-auto-retry.json if this is wrong)`);
       if (result === 'event-ignored') await logger.warn(`Ignored StopFailure marker with non-retryable error="${state._ignoredEventError}". If this is "rate_limit", an outdated hook is installed — re-run "claude-auto-retry install-hook".`);
