@@ -102,6 +102,18 @@ export async function newDetachedSession(name, cwd, width = 120, height = 40) {
   await execFileAsync('tmux', ['new-session', '-d', '-s', name, '-c', cwd, '-x', String(width), '-y', String(height)]);
 }
 
+// All current session names. Used by session-reset.js to sweep orphaned scratch sessions —
+// a monitor killed mid-probe (SIGTERM from a restart) never reaches its own cleanup, so the
+// scratch session and its `claude` process are left running until something else notices.
+export async function listSessionNames() {
+  try {
+    const { stdout } = await execFileAsync('tmux', ['list-sessions', '-F', '#{session_name}']);
+    return stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return []; // no server / no sessions — exit 1, not a crash
+  }
+}
+
 export async function killSession(name) {
   await execFileAsync('tmux', ['kill-session', '-t', name]);
 }

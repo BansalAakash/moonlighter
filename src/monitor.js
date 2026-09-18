@@ -1,6 +1,6 @@
 import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, contextLimitMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
-import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground, newDetachedSession, killSession } from './tmux.js';
+import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground, newDetachedSession, killSession, listSessionNames } from './tmux.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 import { readStopFailureEvent, clearStopFailureEvent, isRetryableError } from './events.js';
@@ -766,7 +766,7 @@ export async function startMonitor(pane, pid) {
   const tmuxAdapter = {
     capturePane, sendKeys, sendKey, getPaneCommand,
     // Only used by session-reset.js's scratch probe — never against this pane.
-    newSession: newDetachedSession, killSession,
+    newSession: newDetachedSession, killSession, listSessions: listSessionNames,
     isClaudeForeground: () => isProcessForeground(pid),
     // Pane-keyed StopFailure markers (written by the hook). The daemon owns the pane,
     // so this is a direct read — no session-id resolution needed.

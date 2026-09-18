@@ -73,10 +73,25 @@ async function waitForPrompt(tmuxAdapter, name, timeoutMs) {
   return false;
 }
 
+const SCRATCH_SESSION_PREFIX = 'car-usage-probe-';
+
+// A monitor killed mid-probe (SIGTERM from a restart — the common case, since restarting
+// monitors is how any code change here takes effect) exits immediately without ever
+// reaching probeViaScratchSession's `finally`, orphaning the scratch tmux session and its
+// `claude` process. Swept here — right before creating a new one — rather than at shutdown
+// time, so it self-heals no matter WHY a previous probe never finished, not just SIGTERM.
+async function sweepOrphanedSessions(tmuxAdapter) {
+  const names = await tmuxAdapter.listSessions();
+  for (const n of names) {
+    if (n.startsWith(SCRATCH_SESSION_PREFIX)) await tmuxAdapter.killSession(n).catch(() => {});
+  }
+}
+
 export async function probeViaScratchSession(tmuxAdapter, config, bootTimeoutMs = BOOT_TIMEOUT_MS) {
-  const name = `car-usage-probe-${process.pid}-${Date.now()}`;
+  const name = `${SCRATCH_SESSION_PREFIX}${process.pid}-${Date.now()}`;
   try {
     await mkdir(SCRATCH_CWD, { recursive: true });
+    await sweepOrphanedSessions(tmuxAdapter);
     await tmuxAdapter.newSession(name, SCRATCH_CWD);
     // `command claude`, never the wrapped `claude` shell function — this must not spin up
     // its own monitored session (a monitor spawning a monitor of itself).
@@ -106,20 +121,32 @@ export async function probeViaScratchSession(tmuxAdapter, config, bootTimeoutMs 
   }
 }
 
+// claimedAt is written the moment a probe STARTS, checkedAt only once one actually
+// FINISHES — distinct fields so a claim whose owner died mid-probe (see
+// sweepOrphanedSessions) doesn't read as "someone's on it" for the full interval. 30s is
+// generous over the ~3-12s a real probe takes, so a live probe is never pre-empted by a
+// second one, but a dead one is retried well within the same idle-tick cadence rather than
+// blocking the shared cache for up to intervalMinutes.
+const CLAIM_ABANDON_MS = 30_000;
+
 // Called from an idle monitoring tick. Returns the best-known reset epoch in ms, or the
 // last good cached value (better than nothing) if a fresh probe fails or isn't due yet.
 export async function getSessionResetAt(tmuxAdapter, config, cacheFile = DEFAULT_CACHE_FILE) {
   const intervalMs = ((config.sessionResetCheck && config.sessionResetCheck.intervalMinutes) || 10) * 60_000;
+  const now = Date.now();
   const cache = await readCache(cacheFile);
-  if (cache && Date.now() - (cache.checkedAt || 0) < intervalMs) {
-    return cache.resetAt || 0;
+  if (cache) {
+    if (cache.checkedAt && now - cache.checkedAt < intervalMs) return cache.resetAt || 0;
+    if (cache.claimedAt && now - cache.claimedAt < CLAIM_ABANDON_MS) return cache.resetAt || 0;
   }
+  const priorResetAt = cache ? cache.resetAt || 0 : 0;
+  const priorCheckedAt = cache ? cache.checkedAt || 0 : 0;
   // Claim the slot up front (before the several-second probe), so a second monitor's tick
-  // landing moments later sees a fresh checkedAt and skips its own redundant scratch session.
-  await writeCache(cacheFile, { resetAt: cache ? cache.resetAt || 0 : 0, checkedAt: Date.now() });
+  // landing moments later sees a fresh claimedAt and skips its own redundant scratch session.
+  await writeCache(cacheFile, { resetAt: priorResetAt, checkedAt: priorCheckedAt, claimedAt: now });
   const resetAt = await probeViaScratchSession(tmuxAdapter, config).catch(() => null);
-  const final = resetAt || (cache ? cache.resetAt || 0 : 0);
-  await writeCache(cacheFile, { resetAt: final, checkedAt: Date.now() });
+  const final = resetAt || priorResetAt;
+  await writeCache(cacheFile, { resetAt: final, checkedAt: Date.now(), claimedAt: now });
   return final;
 }
 
@@ -129,5 +156,5 @@ export async function getSessionResetAt(tmuxAdapter, config, cacheFile = DEFAULT
 // now-meaningless old one for up to intervalMinutes.
 export async function invalidateSessionResetCache(cacheFile = DEFAULT_CACHE_FILE) {
   const cache = await readCache(cacheFile);
-  await writeCache(cacheFile, { resetAt: cache ? cache.resetAt || 0 : 0, checkedAt: 0 });
+  await writeCache(cacheFile, { resetAt: cache ? cache.resetAt || 0 : 0, checkedAt: 0, claimedAt: 0 });
 }
