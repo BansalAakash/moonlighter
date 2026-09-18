@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { getSessionResetAt, invalidateSessionResetCache, probeViaScratchSession } from '../src/session-reset.js';
+import { getSessionUsage, invalidateSessionResetCache, probeViaScratchSession, appendUsageLog } from '../src/session-reset.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 
 // `paneContent` is either a fixed string (every capture returns it) or a function of the
@@ -40,13 +40,27 @@ const USAGE_PANEL = [
   '─'.repeat(40),
 ].join('\n');
 
+const USAGE_PANEL_WITH_WEEKLY = [
+  '   Current session',
+  '   █████████████████                                  34% used',
+  '   Resets 9pm (UTC)',
+  '',
+  '   Current week (all models)',
+  '   ████████████████████████████▉                      58% used',
+  '   Resets Sep 19 at 6:30am (UTC)',
+  '─'.repeat(40),
+  '❯ ',
+  '─'.repeat(40),
+].join('\n');
+
 const cacheFile = () => join(tmpdir(), `car-session-reset-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
 
 describe('probeViaScratchSession', () => {
-  it('spins up a scratch session, reads the reset line, and always tears it down', async () => {
+  it('spins up a scratch session, reads the reset time and usage percent, and always tears it down', async () => {
     const t = mockScratchTmux(USAGE_PANEL);
-    const resetAt = await probeViaScratchSession(t, DEFAULT_CONFIG);
-    assert.ok(resetAt > Date.now());
+    const result = await probeViaScratchSession(t, DEFAULT_CONFIG);
+    assert.ok(result.resetAt > Date.now());
+    assert.equal(result.percentUsed, 34);
     assert.equal(t._newSessions.length, 1);
     assert.match(t._newSessions[0], /^car-usage-probe-/);
     assert.deepEqual(t._sent, ['command claude', '/status']);
@@ -55,17 +69,33 @@ describe('probeViaScratchSession', () => {
     assert.deepEqual(t._killedSessions, [t._newSessions[0]]);
   });
 
+  it('reads a reset time even when the gauge row is missing (percentUsed null, not fatal)', async () => {
+    const noGauge = ['Current session', 'Resets 9pm (UTC)', '❯ '].join('\n');
+    const t = mockScratchTmux(noGauge);
+    const result = await probeViaScratchSession(t, DEFAULT_CONFIG);
+    assert.ok(result.resetAt > Date.now());
+    assert.equal(result.percentUsed, null);
+  });
+
+  it('also reads the weekly figures when the panel shows a "Current week" block', async () => {
+    const t = mockScratchTmux(USAGE_PANEL_WITH_WEEKLY);
+    const result = await probeViaScratchSession(t, DEFAULT_CONFIG);
+    assert.equal(result.percentUsed, 34);
+    assert.equal(result.weeklyPercentUsed, 58);
+    assert.equal(result.weeklyResetText, 'Resets Sep 19 at 6:30am (UTC)');
+  });
+
   it('gives up and tears the session down if the prompt never appears', async () => {
     const t = mockScratchTmux('Version: 2.1.276\nEsc to cancel'); // no prompt row → never "boots"
-    const resetAt = await probeViaScratchSession(t, DEFAULT_CONFIG, 50); // short timeout for the test
-    assert.equal(resetAt, null);
+    const result = await probeViaScratchSession(t, DEFAULT_CONFIG, 50); // short timeout for the test
+    assert.equal(result, null);
     assert.equal(t._killedSessions.length, 1);
   });
 
   it('tears the scratch session down even when the reset line is never found', async () => {
     const t = mockScratchTmux('Current session\nno reset line here\n❯ ');
-    const resetAt = await probeViaScratchSession(t, DEFAULT_CONFIG);
-    assert.equal(resetAt, null);
+    const result = await probeViaScratchSession(t, DEFAULT_CONFIG);
+    assert.equal(result, null);
     assert.equal(t._killedSessions.length, 1);
   });
 
@@ -98,61 +128,91 @@ describe('probeViaScratchSession', () => {
     ].join('\n');
     // Dialog for the first 2 polls (boot + one retry), then a normal idle prompt from then on.
     const t = mockScratchTmux((n) => (n <= 2 ? TRUST_DIALOG : USAGE_PANEL));
-    const resetAt = await probeViaScratchSession(t, DEFAULT_CONFIG);
-    assert.ok(resetAt > Date.now());
+    const result = await probeViaScratchSession(t, DEFAULT_CONFIG);
+    assert.ok(result.resetAt > Date.now());
     // Down (to "Yes, I trust this folder") + Enter to accept it, sent exactly once.
     assert.deepEqual(t._keys.slice(0, 2), ['Down', 'Enter']);
     assert.deepEqual(t._keys.slice(2), ['Right', 'Right'], 'navigation keys still follow, unduplicated');
   });
 });
 
-describe('getSessionResetAt / invalidateSessionResetCache', () => {
+describe('getSessionUsage / invalidateSessionResetCache', () => {
   const files = [];
   afterEach(async () => { await Promise.all(files.splice(0).map((f) => rm(f, { force: true }))); });
 
-  it('probes on first call and caches the result', async () => {
+  it('probes on first call, caches the result, and reports fresh: true', async () => {
     const file = cacheFile(); files.push(file);
     const t = mockScratchTmux(USAGE_PANEL);
-    const resetAt = await getSessionResetAt(t, DEFAULT_CONFIG, file);
-    assert.ok(resetAt > Date.now());
+    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    assert.ok(usage.resetAt > Date.now());
+    assert.equal(usage.percentUsed, 34);
+    assert.equal(usage.fresh, true);
     assert.equal(t._newSessions.length, 1);
 
     const cached = JSON.parse(await readFile(file, 'utf-8'));
-    assert.equal(cached.resetAt, resetAt);
+    assert.equal(cached.resetAt, usage.resetAt);
+    assert.equal(cached.percentUsed, 34);
   });
 
-  it('does not re-probe within intervalMinutes — serves the cached value', async () => {
+  it('caches and returns the weekly figures alongside the session ones', async () => {
+    const file = cacheFile(); files.push(file);
+    const t = mockScratchTmux(USAGE_PANEL_WITH_WEEKLY);
+    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    assert.equal(usage.weeklyPercentUsed, 58);
+    assert.equal(usage.weeklyResetText, 'Resets Sep 19 at 6:30am (UTC)');
+
+    const cached = JSON.parse(await readFile(file, 'utf-8'));
+    assert.equal(cached.weeklyPercentUsed, 58);
+    assert.equal(cached.weeklyResetText, 'Resets Sep 19 at 6:30am (UTC)');
+  });
+
+  it('does not re-probe within intervalMinutes — serves the cached value with fresh: false', async () => {
     const file = cacheFile(); files.push(file);
     const t = mockScratchTmux(USAGE_PANEL);
     const config = { ...DEFAULT_CONFIG, sessionResetCheck: { enabled: true, intervalMinutes: 10 } };
-    const first = await getSessionResetAt(t, config, file);
-    const second = await getSessionResetAt(t, config, file);
-    assert.equal(second, first);
+    const first = await getSessionUsage(t, config, file);
+    const second = await getSessionUsage(t, config, file);
+    assert.equal(second.resetAt, first.resetAt);
+    assert.equal(second.percentUsed, first.percentUsed);
+    assert.equal(second.fresh, false);
     assert.equal(t._newSessions.length, 1, 'second call must not spin up another scratch session');
   });
 
-  it('falls back to the last good cached value when a fresh probe fails', async () => {
+  it('falls back to the last good cached values when a fresh probe fails entirely', async () => {
     const file = cacheFile(); files.push(file);
     const good = mockScratchTmux(USAGE_PANEL);
-    const first = await getSessionResetAt(good, DEFAULT_CONFIG, file);
+    const first = await getSessionUsage(good, DEFAULT_CONFIG, file);
 
     await invalidateSessionResetCache(file); // force the next call to actually probe again
     // Boots fine (has an empty prompt row) but the Usage tab never has a parseable line —
     // a stale cache falling back to the timeout-slow "never boots" path would make this
     // test needlessly slow without testing anything the boot-timeout test doesn't already.
     const failing = mockScratchTmux('❯ ');
-    const second = await getSessionResetAt(failing, DEFAULT_CONFIG, file);
-    assert.equal(second, first, 'a failed probe should not blank out a previously-known reset time');
+    const second = await getSessionUsage(failing, DEFAULT_CONFIG, file);
+    assert.equal(second.resetAt, first.resetAt, 'a failed probe should not blank out a previously-known reset time');
+    assert.equal(second.percentUsed, first.percentUsed);
+  });
+
+  it('a probe that finds the reset time but not the gauge reports percentUsed: null, not the stale figure', async () => {
+    const file = cacheFile(); files.push(file);
+    const good = mockScratchTmux(USAGE_PANEL);
+    await getSessionUsage(good, DEFAULT_CONFIG, file);
+
+    await invalidateSessionResetCache(file);
+    const noGauge = mockScratchTmux(['Current session', 'Resets 9pm (UTC)', '❯ '].join('\n'));
+    const second = await getSessionUsage(noGauge, DEFAULT_CONFIG, file);
+    assert.equal(second.percentUsed, null, 'a partial success should not reuse a possibly-drifted stale percentage');
   });
 
   it('does not re-probe while a recent claim is presumably still in flight', async () => {
     const file = cacheFile(); files.push(file);
     // A claim from "just now" with no completed checkedAt yet — another monitor's probe
     // that (as far as this one knows) simply hasn't finished.
-    await writeFile(file, JSON.stringify({ resetAt: 0, checkedAt: 0, claimedAt: Date.now() }));
+    await writeFile(file, JSON.stringify({ resetAt: 0, percentUsed: null, checkedAt: 0, claimedAt: Date.now() }));
     const t = mockScratchTmux(USAGE_PANEL);
-    const resetAt = await getSessionResetAt(t, DEFAULT_CONFIG, file);
-    assert.equal(resetAt, 0);
+    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    assert.equal(usage.resetAt, 0);
+    assert.equal(usage.fresh, false);
     assert.equal(t._newSessions.length, 0, 'must not start a second probe over a fresh claim');
   });
 
@@ -161,21 +221,55 @@ describe('getSessionResetAt / invalidateSessionResetCache', () => {
     // Old enough that whatever claimed it (a monitor SIGTERM'd mid-probe — see
     // sweepOrphanedSessions) could not possibly still be genuinely in flight.
     const longAgo = Date.now() - 60_000;
-    await writeFile(file, JSON.stringify({ resetAt: 0, checkedAt: 0, claimedAt: longAgo }));
+    await writeFile(file, JSON.stringify({ resetAt: 0, percentUsed: null, checkedAt: 0, claimedAt: longAgo }));
     const t = mockScratchTmux(USAGE_PANEL);
-    const resetAt = await getSessionResetAt(t, DEFAULT_CONFIG, file);
-    assert.ok(resetAt > Date.now(), 'an abandoned claim must not block a retry forever');
+    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    assert.ok(usage.resetAt > Date.now(), 'an abandoned claim must not block a retry forever');
     assert.equal(t._newSessions.length, 1);
   });
 
   it('invalidateSessionResetCache forces the next call to probe again', async () => {
     const file = cacheFile(); files.push(file);
     const t = mockScratchTmux(USAGE_PANEL);
-    await getSessionResetAt(t, DEFAULT_CONFIG, file);
+    await getSessionUsage(t, DEFAULT_CONFIG, file);
     assert.equal(t._newSessions.length, 1);
 
     await invalidateSessionResetCache(file);
-    await getSessionResetAt(t, DEFAULT_CONFIG, file);
+    await getSessionUsage(t, DEFAULT_CONFIG, file);
     assert.equal(t._newSessions.length, 2, 'invalidated cache must trigger a second probe');
+  });
+});
+
+describe('appendUsageLog', () => {
+  const files = [];
+  afterEach(async () => { await Promise.all(files.splice(0).map((f) => rm(f, { force: true }))); });
+  const logFile = () => join(tmpdir(), `car-usage-log-test-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+
+  it('writes one timestamped line with both the 5-hour and weekly figures', async () => {
+    const file = logFile(); files.push(file);
+    await appendUsageLog({
+      resetAt: Date.now() + 4 * 3600_000 + 29 * 60_000,
+      percentUsed: 34,
+      weeklyPercentUsed: 58,
+      weeklyResetText: 'Resets Sep 19 at 6:30am (UTC)',
+    }, file);
+    const content = await readFile(file, 'utf-8');
+    assert.match(content, /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] 5-hour: 34% used, resets in 4h29m \| Weekly: 58% used, Resets Sep 19 at 6:30am \(UTC\)\n$/);
+  });
+
+  it('appends rather than overwrites', async () => {
+    const file = logFile(); files.push(file);
+    const usage = { resetAt: Date.now() + 60_000, percentUsed: 1, weeklyPercentUsed: 1, weeklyResetText: 'Resets Sep 19 at 6:30am (UTC)' };
+    await appendUsageLog(usage, file);
+    await appendUsageLog(usage, file);
+    const content = await readFile(file, 'utf-8');
+    assert.equal(content.trim().split('\n').length, 2);
+  });
+
+  it('degrades to "unknown" rather than throwing when figures are missing', async () => {
+    const file = logFile(); files.push(file);
+    await appendUsageLog({ resetAt: 0, percentUsed: null, weeklyPercentUsed: null, weeklyResetText: null }, file);
+    const content = await readFile(file, 'utf-8');
+    assert.match(content, /5-hour: unknown \| Weekly: unknown/);
   });
 });

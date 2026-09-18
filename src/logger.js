@@ -21,7 +21,14 @@ function localParts(d) {
 }
 
 function timestamp() {
-  const { y, mo, day, h, mi, s } = localParts(new Date());
+  return localTimestamp();
+}
+
+// Exported for other modules that write their own timestamped files (e.g. session-reset.js's
+// usage_log.txt) and want the same local-time convention as the monitor's own logs, rather
+// than a second, differently-timezoned implementation of the same three lines.
+export function localTimestamp(date = new Date()) {
+  const { y, mo, day, h, mi, s } = localParts(date);
   return `${y}-${mo}-${day} ${h}:${mi}:${s}`;
 }
 

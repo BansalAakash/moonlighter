@@ -16,11 +16,12 @@
 // the file's checkedAt lets concurrent monitors avoid piling on redundant scratch
 // sessions (each one claims the slot by writing a fresh checkedAt before it starts).
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, appendFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
-import { findSessionResetLine, isInputBoxEmpty } from './patterns.js';
+import { findSessionResetLine, findSessionUsagePercent, findWeeklyResetLine, findWeeklyUsagePercent, isInputBoxEmpty } from './patterns.js';
+import { localTimestamp } from './logger.js';
 
 // Overridable (see getSessionResetAt/invalidateSessionResetCache's cacheFile param) so
 // tests don't read or write the real, shared, machine-wide cache — mirrors logger.js's
@@ -113,7 +114,15 @@ export async function probeViaScratchSession(tmuxAdapter, config, bootTimeoutMs 
     if (!line) return null;
     const parsed = parseResetTime(line);
     if (!parsed) return null;
-    return Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
+    const resetAt = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
+    // A failure to read the gauge doesn't invalidate the reset time — they're independent
+    // reads of the same screen, and the reset time is the one this file exists for. Weekly
+    // figures are read as raw text, not turned into an epoch (see findWeeklyResetLine) —
+    // nothing currently drives a countdown off the weekly boundary, only publishes it.
+    const percentUsed = findSessionUsagePercent(raw);
+    const weeklyPercentUsed = findWeeklyUsagePercent(raw);
+    const weeklyResetText = findWeeklyResetLine(raw);
+    return { resetAt, percentUsed, weeklyPercentUsed, weeklyResetText };
   } finally {
     // Nuke the session outright rather than exiting claude cleanly — nobody is watching
     // it, and that's simpler and faster than a graceful /exit handshake.
@@ -129,25 +138,46 @@ export async function probeViaScratchSession(tmuxAdapter, config, bootTimeoutMs 
 // blocking the shared cache for up to intervalMinutes.
 const CLAIM_ABANDON_MS = 30_000;
 
-// Called from an idle monitoring tick. Returns the best-known reset epoch in ms, or the
-// last good cached value (better than nothing) if a fresh probe fails or isn't due yet.
-export async function getSessionResetAt(tmuxAdapter, config, cacheFile = DEFAULT_CACHE_FILE) {
+// The four figures worth persisting across calls, defaulted for a missing/empty cache.
+function pickCacheFields(source) {
+  return {
+    resetAt: source ? source.resetAt || 0 : 0,
+    percentUsed: source && source.percentUsed != null ? source.percentUsed : null,
+    weeklyPercentUsed: source && source.weeklyPercentUsed != null ? source.weeklyPercentUsed : null,
+    weeklyResetText: source && source.weeklyResetText != null ? source.weeklyResetText : null,
+  };
+}
+
+// Called from an idle monitoring tick. Returns { resetAt, percentUsed, weeklyPercentUsed,
+// weeklyResetText, fresh } — fresh is true only when a probe actually ran THIS call (as
+// opposed to serving a cache hit or deferring to another monitor's in-flight claim), so
+// callers can tell "just learned something new" apart from "nothing changed, don't bother
+// logging it".
+export async function getSessionUsage(tmuxAdapter, config, cacheFile = DEFAULT_CACHE_FILE) {
   const intervalMs = ((config.sessionResetCheck && config.sessionResetCheck.intervalMinutes) || 10) * 60_000;
   const now = Date.now();
   const cache = await readCache(cacheFile);
   if (cache) {
-    if (cache.checkedAt && now - cache.checkedAt < intervalMs) return cache.resetAt || 0;
-    if (cache.claimedAt && now - cache.claimedAt < CLAIM_ABANDON_MS) return cache.resetAt || 0;
+    if (cache.checkedAt && now - cache.checkedAt < intervalMs) return { ...pickCacheFields(cache), fresh: false };
+    if (cache.claimedAt && now - cache.claimedAt < CLAIM_ABANDON_MS) return { ...pickCacheFields(cache), fresh: false };
   }
-  const priorResetAt = cache ? cache.resetAt || 0 : 0;
+  const prior = pickCacheFields(cache);
   const priorCheckedAt = cache ? cache.checkedAt || 0 : 0;
   // Claim the slot up front (before the several-second probe), so a second monitor's tick
   // landing moments later sees a fresh claimedAt and skips its own redundant scratch session.
-  await writeCache(cacheFile, { resetAt: priorResetAt, checkedAt: priorCheckedAt, claimedAt: now });
-  const resetAt = await probeViaScratchSession(tmuxAdapter, config).catch(() => null);
-  const final = resetAt || priorResetAt;
-  await writeCache(cacheFile, { resetAt: final, checkedAt: Date.now(), claimedAt: now });
-  return final;
+  await writeCache(cacheFile, { ...prior, checkedAt: priorCheckedAt, claimedAt: now });
+  const result = await probeViaScratchSession(tmuxAdapter, config).catch(() => null);
+  const final = {
+    resetAt: (result && result.resetAt) || prior.resetAt,
+    // A totally failed probe falls back to the last known figures (better than nothing,
+    // same as resetAt); a probe that succeeded but couldn't read a given row reports that
+    // one as unknown rather than silently reusing a figure that's since drifted.
+    percentUsed: result ? result.percentUsed : prior.percentUsed,
+    weeklyPercentUsed: result ? result.weeklyPercentUsed : prior.weeklyPercentUsed,
+    weeklyResetText: result ? result.weeklyResetText : prior.weeklyResetText,
+  };
+  await writeCache(cacheFile, { ...final, checkedAt: Date.now(), claimedAt: now });
+  return { ...final, fresh: true };
 }
 
 // A real usage-limit episode just resolved, so the window that produced the cached
@@ -156,5 +186,30 @@ export async function getSessionResetAt(tmuxAdapter, config, cacheFile = DEFAULT
 // now-meaningless old one for up to intervalMinutes.
 export async function invalidateSessionResetCache(cacheFile = DEFAULT_CACHE_FILE) {
   const cache = await readCache(cacheFile);
-  await writeCache(cacheFile, { resetAt: cache ? cache.resetAt || 0 : 0, checkedAt: 0, claimedAt: 0 });
+  await writeCache(cacheFile, { ...pickCacheFields(cache), checkedAt: 0, claimedAt: 0 });
+}
+
+export const DEFAULT_USAGE_LOG_FILE = join(homedir(), '.claude-auto-retry', 'usage_log.txt');
+
+function formatDuration(ms) {
+  const totalMin = Math.max(0, Math.round(ms / 60_000));
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return h > 0 ? `${h}h${m}m` : `${m}m`;
+}
+
+// A plain-text running log of the two quotas, one line per fresh check — separate from the
+// JSON cache (which exists to be read by this code, not skimmed by a person). Requested
+// directly: publish the 5-hour and weekly remaining quota to usage_log.txt periodically.
+// Takes the object getSessionUsage just returned rather than re-reading the cache, so a
+// caller that already has a fresh result doesn't pay for a redundant file read.
+export async function appendUsageLog(usage, logFile = DEFAULT_USAGE_LOG_FILE) {
+  const sessionPart = usage.resetAt
+    ? `5-hour: ${usage.percentUsed != null ? `${usage.percentUsed}% used` : 'unknown%'}, resets in ${formatDuration(usage.resetAt - Date.now())}`
+    : '5-hour: unknown';
+  const weeklyPart = usage.weeklyResetText
+    ? `Weekly: ${usage.weeklyPercentUsed != null ? `${usage.weeklyPercentUsed}% used` : 'unknown%'}, ${usage.weeklyResetText}`
+    : 'Weekly: unknown';
+  await mkdir(dirname(logFile), { recursive: true });
+  await appendFile(logFile, `[${localTimestamp()}] ${sessionPart} | ${weeklyPart}\n`);
 }

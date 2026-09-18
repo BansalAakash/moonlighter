@@ -6,7 +6,7 @@ import { createLogger } from './logger.js';
 import { readStopFailureEvent, clearStopFailureEvent, isRetryableError } from './events.js';
 import { writeStatus, clearStatus, sweepStaleStatus } from './status-file.js';
 import { readSessionPrompt } from './session-prompt.js';
-import { getSessionResetAt, invalidateSessionResetCache } from './session-reset.js';
+import { getSessionUsage, invalidateSessionResetCache, appendUsageLog } from './session-reset.js';
 
 const DEFAULT_FOREGROUND_COMMANDS = ['node', 'claude', 'npx', 'tsx', 'bun', 'deno'];
 const SHELL_COMMANDS = ['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh'];
@@ -38,9 +38,15 @@ export function createMonitorState() {
     // families don't: _contextCompactedAt marks that a /compact was sent and the row has
     // since cleared, which is what licenses the follow-up continuation send.
     contextAttempts: 0, contextWaitUntil: 0, _contextCompactSentAt: 0,
-    // Best-known reset time for the CURRENT usage window, learned via session-reset.js's
-    // shared, account-wide cache — not tied to an active wait. 0 = unknown yet.
+    // Best-known reset time and usage percentage for the CURRENT usage window, learned via
+    // session-reset.js's shared, account-wide cache — not tied to an active wait.
+    // sessionResetAt: 0 = unknown yet. sessionUsedPercent: null = unknown yet.
     sessionResetAt: 0,
+    sessionUsedPercent: null,
+    // Weekly figures — published to usage_log.txt (appendUsageLog) but not otherwise part
+    // of the menu bar's own countdown, which is scoped to the 5-hour session window.
+    sessionWeeklyPercent: null,
+    sessionWeeklyResetText: null,
   };
 }
 
@@ -725,9 +731,13 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   // shared cache file is what actually throttles how often a scratch probe runs at all.
   const resetCheck = config.sessionResetCheck;
   if (resetCheck && resetCheck.enabled) {
-    const resetAt = await getSessionResetAt(tmuxAdapter, config).catch(() => 0);
-    if (resetAt && resetAt !== state.sessionResetAt) {
-      state.sessionResetAt = resetAt;
+    const usage = await getSessionUsage(tmuxAdapter, config).catch(() => null);
+    if (usage && usage.fresh) {
+      if (usage.resetAt) state.sessionResetAt = usage.resetAt;
+      state.sessionUsedPercent = usage.percentUsed;
+      state.sessionWeeklyPercent = usage.weeklyPercentUsed;
+      state.sessionWeeklyResetText = usage.weeklyResetText;
+      state._lastUsage = usage; // handed to appendUsageLog by the caller, not re-fetched
       return 'session-reset-learned';
     }
   }
@@ -802,6 +812,9 @@ export async function startMonitor(pane, pid) {
         safeguardWaitUntil: Math.floor(state.safeguardWaitUntil / 1000),
         contextWaitUntil: Math.floor(state.contextWaitUntil / 1000),
         sessionResetAt: Math.floor(state.sessionResetAt / 1000),
+        sessionUsedPercent: state.sessionUsedPercent,
+        sessionWeeklyPercent: state.sessionWeeklyPercent,
+        sessionWeeklyResetText: state.sessionWeeklyResetText,
         attempts: state.attempts,
         overloadAttempts: state.overloadAttempts,
         safeguardAttempts: state.safeguardAttempts,
@@ -838,7 +851,9 @@ export async function startMonitor(pane, pid) {
       }
       if (result === 'session-reset-learned') {
         const secs = Math.round((state.sessionResetAt - Date.now()) / 1000);
-        await logger.info(`Checked /status while idle — session resets in ${secs}s.`);
+        const pct = state.sessionUsedPercent != null ? `${state.sessionUsedPercent}% used, ` : '';
+        await logger.info(`Checked /status while idle — ${pct}session resets in ${secs}s.`);
+        if (state._lastUsage) await appendUsageLog(state._lastUsage).catch(() => {});
       }
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
       if (result === 'skipped-not-claude') await logger.warn(`Foreground is "${state._lastForeground}", not Claude. Skipping send-keys. (Add to foregroundCommands in ~/.claude-auto-retry.json if this is wrong)`);

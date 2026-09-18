@@ -120,9 +120,15 @@ one needs you.
 With `sessionResetCheck.enabled` on (see below), the countdown doesn't disappear the rest
 of the time either. The reset time turns out to be account-wide rather than per-session, so
 rather than opening `/status` inside a pane you're actually using, a monitor occasionally
-spins up its own invisible, disposable session, reads the same boundary off *that*, and
-tears it down — your real panes are never sent a keystroke. Off by default, since it does
-still launch a real (very short-lived) `claude` process on a timer.
+spins up its own invisible, disposable session, reads the same boundary off *that* — along
+with the usage percentage and the weekly figures — and tears it down: your real panes are
+never sent a keystroke, and `/status` never calls the model, so this costs no usage/tokens
+either. Off by default anyway, since it does still launch a real (very short-lived) `claude`
+process on a timer.
+
+The per-session percentage shows up in the menu ("34% used · resets in 4h29m"); both the
+5-hour and weekly figures are appended to `~/.claude-auto-retry/usage_log.txt` on every
+fresh check, one line per check, if you want a plain-text history of them.
 
 Clicking it gives you the whole app in about six lines:
 

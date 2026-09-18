@@ -23,6 +23,9 @@ struct PaneStatus: Decodable {
     var pollIntervalSeconds: Int?
     var gaveUp: Bool?
     var sessionResetAt: Int?
+    var sessionUsedPercent: Int?
+    var sessionWeeklyPercent: Int?
+    var sessionWeeklyResetText: String?
     var updatedAt: Int
 }
 
@@ -117,7 +120,9 @@ struct Session {
         case "context":
             return "compacting, then resuming"
         default:
-            return sessionResetDeadline.map { "resets in \(Self.short($0))" } ?? "running"
+            guard let d = sessionResetDeadline else { return "running" }
+            let pct = status.sessionUsedPercent.map { "\($0)% used · " } ?? ""
+            return "\(pct)resets in \(Self.short(d))"
         }
     }
 

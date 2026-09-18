@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, isInputBoxEmpty, findSessionResetLine } from '../src/patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, isInputBoxEmpty, findSessionResetLine, findSessionUsagePercent, findWeeklyResetLine, findWeeklyUsagePercent } from '../src/patterns.js';
 
 const MENU_UPGRADE_FIRST = [
   "You've hit your session limit · resets 6:50pm (Europe/London)",
@@ -1108,5 +1108,28 @@ describe('findSessionResetLine', () => {
   it('returns null when "Current session" is present but no reset row follows within range', () => {
     const noReset = ['Current session', 'not a reset line', '', '', '', '', 'Current week'].join('\n');
     assert.equal(findSessionResetLine(noReset), null);
+  });
+
+  it('findSessionUsagePercent reads the "Current session" gauge, not the weekly one', () => {
+    assert.equal(findSessionUsagePercent(usagePanel), 34);
+  });
+  it('findSessionUsagePercent returns null when the panel is not showing', () => {
+    assert.equal(findSessionUsagePercent('Version: 2.1.276\nSession ID: abc\nEsc to cancel'), null);
+  });
+  it('findSessionUsagePercent returns null when no gauge row follows within range', () => {
+    const noGauge = ['Current session', 'not a gauge line', '', '', '', '', 'Current week'].join('\n');
+    assert.equal(findSessionUsagePercent(noGauge), null);
+  });
+
+  it('findWeeklyResetLine reads the "Current week" reset row, not the session one', () => {
+    assert.equal(findWeeklyResetLine(usagePanel), 'Resets Sep 19 at 6:30am (Asia/Calcutta)');
+  });
+  it('findWeeklyUsagePercent reads the "Current week" gauge, not the session one', () => {
+    assert.equal(findWeeklyUsagePercent(usagePanel), 58);
+  });
+  it('findWeeklyResetLine/findWeeklyUsagePercent return null when the panel is not showing', () => {
+    const noPanel = 'Version: 2.1.276\nSession ID: abc\nEsc to cancel';
+    assert.equal(findWeeklyResetLine(noPanel), null);
+    assert.equal(findWeeklyUsagePercent(noPanel), null);
   });
 });

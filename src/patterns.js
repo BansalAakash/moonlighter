@@ -815,20 +815,45 @@ export function isInputBoxEmpty(text) {
   return false;
 }
 
-// Reads the "Current session … Resets <time>" row off the Usage tab of Claude Code's /status
-// panel (monitor.js drives Right/Right/Right to reach it, then captures). Scoped to the
-// "Current session" block specifically — the panel also prints a "Current week" reset a few
-// lines below in a shape parseResetTime doesn't handle ("Resets Sep 19 at 6:30am"), and
-// mixing the two up would report a weekly boundary as the session's.
+// Reads a row shape (RESET_ROW or USAGE_PERCENT_ROW) out of one block of the Usage tab —
+// "Current session" or "Current week (all models)" — anchored to that block's own header so
+// the other block's row of the same shape (each has its own reset line and its own gauge)
+// is never picked up by mistake.
 const RESET_ROW = /^\s*Resets\s+/i;
-export function findSessionResetLine(text) {
+const USAGE_PERCENT_ROW = /(\d{1,3})%\s*used/i;
+function findInUsageBlock(text, blockHeader, rowPattern, extract) {
   const lines = stripAnsi(text).split('\n');
-  const start = lines.findIndex((l) => /Current session\b/.test(l));
+  const start = lines.findIndex((l) => blockHeader.test(l));
   if (start === -1) return null;
   for (let i = start + 1; i < Math.min(start + 5, lines.length); i++) {
-    if (RESET_ROW.test(lines[i])) return lines[i].trim();
+    const m = lines[i].match(rowPattern);
+    if (m) return extract ? extract(m) : lines[i].trim();
   }
   return null;
+}
+
+const CURRENT_SESSION_HEADER = /Current session\b/;
+const CURRENT_WEEK_HEADER = /Current week\b/;
+
+// The "Resets <time>" row and "NN% used" gauge for the 5-hour session window — the pair
+// monitor.js's scratch probe turns into sessionResetAt/sessionUsedPercent for the menu bar's
+// always-on countdown.
+export function findSessionResetLine(text) {
+  return findInUsageBlock(text, CURRENT_SESSION_HEADER, RESET_ROW);
+}
+export function findSessionUsagePercent(text) {
+  return findInUsageBlock(text, CURRENT_SESSION_HEADER, USAGE_PERCENT_ROW, (m) => parseInt(m[1], 10));
+}
+
+// Same pair for the weekly window. The weekly reset line is a different SHAPE ("Resets Sep
+// 19 at 6:30am …", a date rather than a bare time) that parseResetTime/calculateWaitMs
+// don't handle — callers that just want to publish the raw figures (see monitor.js's
+// usage_log.txt) can use the text as-is; nothing here currently turns it into an epoch.
+export function findWeeklyResetLine(text) {
+  return findInUsageBlock(text, CURRENT_WEEK_HEADER, RESET_ROW);
+}
+export function findWeeklyUsagePercent(text) {
+  return findInUsageBlock(text, CURRENT_WEEK_HEADER, USAGE_PERCENT_ROW, (m) => parseInt(m[1], 10));
 }
 
 // tailLines > 0 bounds the scan to the same chrome-aware window isRateLimited uses. The
