@@ -92,3 +92,13 @@ export async function isProcessForeground(pid) {
 
 export function isInsideTmux() { return !!process.env.TMUX; }
 export function getCurrentPane() { return process.env.TMUX_PANE || null; }
+
+// A disposable, invisible session for session-reset.js's scratch probe — never attached,
+// never shown to the user. Small dimensions since nobody ever looks at it.
+export async function newDetachedSession(name, width = 120, height = 40) {
+  await execFileAsync('tmux', ['new-session', '-d', '-s', name, '-x', String(width), '-y', String(height)]);
+}
+
+export async function killSession(name) {
+  await execFileAsync('tmux', ['kill-session', '-t', name]);
+}

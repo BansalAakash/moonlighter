@@ -661,56 +661,15 @@ describe('processOneTick', () => {
   });
 });
 
-// The mock's capturePane ignores its args and always returns the same string — good enough
-// here, since the probe's own capture (post /status navigation) reuses whatever the pane
-// "currently shows" in these tests, same as the tick's initial capture.
-const IDLE_USAGE_PANEL_AND_PROMPT = [
-  '   Current session',
-  '   █████████████████                                  34% used',
-  '   Resets 9pm (UTC)',
-  '─'.repeat(40),
-  '❯ ',
-  '─'.repeat(40),
-  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent',
-].join('\n');
-
-describe('session-reset check (/status probe)', () => {
-  it('off by default — an idle, empty-prompt tick does not probe', async () => {
-    const t = mockTmux(IDLE_USAGE_PANEL_AND_PROMPT);
+// The session-reset check no longer touches this pane at all (see session-reset.js — it
+// asks a disposable scratch session instead), so there is little left to integration-test
+// at the processOneTick layer beyond "disabled means untouched". The probe's own tmux
+// choreography and caching are covered directly in test/session-reset.test.js.
+describe('session-reset check (disabled by default)', () => {
+  it('off by default — an idle tick neither probes nor touches sessionResetAt', async () => {
+    const t = mockTmux('Normal output');
     const s = createMonitorState();
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'monitoring');
-    assert.equal(t._sent.length, 0);
     assert.equal(s.sessionResetAt, 0);
-  });
-
-  it('when enabled, probes an idle empty-prompt pane and learns the reset time', async () => {
-    const t = mockTmux(IDLE_USAGE_PANEL_AND_PROMPT);
-    const s = createMonitorState();
-    const config = { ...DEFAULT_CONFIG, sessionResetCheck: { enabled: true, intervalMinutes: 10 } };
-    const result = await processOneTick(s, t, '%0', config, () => true);
-    assert.equal(result, 'session-reset-learned');
-    assert.ok(s.sessionResetAt > Date.now());
-    assert.deepEqual(t._sent, ['/status']);
-    assert.deepEqual(t._keys, ['Right', 'Right', 'Escape']);
-  });
-
-  it('when enabled, does NOT probe while the input box has an in-progress prompt', async () => {
-    const busy = IDLE_USAGE_PANEL_AND_PROMPT.replace('❯ ', '❯ fix the ');
-    const t = mockTmux(busy);
-    const s = createMonitorState();
-    const config = { ...DEFAULT_CONFIG, sessionResetCheck: { enabled: true, intervalMinutes: 10 } };
-    assert.equal(await processOneTick(s, t, '%0', config, () => true), 'monitoring');
-    assert.equal(t._sent.length, 0);
-    assert.equal(s.sessionResetAt, 0);
-  });
-
-  it('when enabled, respects the interval — does not re-probe right away', async () => {
-    const t = mockTmux(IDLE_USAGE_PANEL_AND_PROMPT);
-    const s = createMonitorState();
-    const config = { ...DEFAULT_CONFIG, sessionResetCheck: { enabled: true, intervalMinutes: 10 } };
-    await processOneTick(s, t, '%0', config, () => true);
-    assert.equal(t._sent.length, 1);
-    await processOneTick(s, t, '%0', config, () => true);
-    assert.equal(t._sent.length, 1, 'a second immediate tick must not re-probe');
   });
 });

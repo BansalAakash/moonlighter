@@ -118,12 +118,11 @@ working. It shows a countdown while a session is waiting out a limit, and turns 
 one needs you.
 
 With `sessionResetCheck.enabled` on (see below), the countdown doesn't disappear the rest
-of the time either: while a session is otherwise idle, the monitor occasionally opens
-Claude Code's own `/status` → Usage panel to read the reset time, then closes it again —
-so the icon can show "time until reset" continuously, not only once something has already
-gone wrong. Off by default because it types into the pane on a timer during normal
-operation; it only ever does this when the input box is confirmed empty and Claude isn't
-mid-response.
+of the time either. The reset time turns out to be account-wide rather than per-session, so
+rather than opening `/status` inside a pane you're actually using, a monitor occasionally
+spins up its own invisible, disposable session, reads the same boundary off *that*, and
+tears it down — your real panes are never sent a keystroke. Off by default, since it does
+still launch a real (very short-lived) `claude` process on a timer.
 
 Clicking it gives you the whole app in about six lines:
 
