@@ -27,6 +27,14 @@ import { findSessionResetLine, isInputBoxEmpty } from './patterns.js';
 // createLogger(dir).
 export const DEFAULT_CACHE_FILE = join(homedir(), '.claude-auto-retry', 'session-reset-cache.json');
 
+// FIXED, not the caller's own cwd: Claude Code's first-run trust dialog is keyed by
+// directory (persisted in ~/.claude.json's projects[<dir>].hasTrustDialogAccepted), so a
+// probe launched in whatever directory the monitor process happens to have as its cwd
+// would re-trigger that dialog in a fresh, unrelated folder every time it differs. Using
+// one dedicated, always-the-same directory means the dialog (handled below) is answered
+// at most once, ever, on a given machine — every later probe boots straight to a prompt.
+export const SCRATCH_CWD = join(homedir(), '.claude-auto-retry', 'scratch-probe-cwd');
+
 // claude can take a few seconds to boot (more on a cold cache / first launch of the day).
 const BOOT_TIMEOUT_MS = 12_000;
 const BOOT_POLL_MS = 400;
@@ -40,12 +48,25 @@ async function writeCache(cacheFile, data) {
   await writeFile(cacheFile, JSON.stringify(data));
 }
 
+// "Quick safety check: Is this a project you created or one you trust? ... ❯ No, exit /
+// Yes, I trust this folder" — Claude Code's first-run-per-directory prompt, cursor
+// defaulting to "No, exit". Answered at most once ever (see SCRATCH_CWD); every
+// subsequent probe's first capture already shows a bare prompt and this never matches.
+const TRUST_DIALOG_MARKER = /Yes, I trust this folder/;
+
 async function waitForPrompt(tmuxAdapter, name, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
+  let acceptedTrustDialog = false;
   while (Date.now() < deadline) {
     try {
       const raw = await tmuxAdapter.capturePane(name, 60);
       if (isInputBoxEmpty(raw)) return true;
+      if (!acceptedTrustDialog && TRUST_DIALOG_MARKER.test(raw)) {
+        acceptedTrustDialog = true; // once — a stuck dialog otherwise re-triggers every poll
+        await tmuxAdapter.sendKey(name, 'Down');   // "No, exit" → "Yes, I trust this folder"
+        await new Promise((r) => setTimeout(r, 150));
+        await tmuxAdapter.sendKey(name, 'Enter');
+      }
     } catch { /* session not fully up yet */ }
     await new Promise((r) => setTimeout(r, BOOT_POLL_MS));
   }
@@ -55,7 +76,8 @@ async function waitForPrompt(tmuxAdapter, name, timeoutMs) {
 export async function probeViaScratchSession(tmuxAdapter, config, bootTimeoutMs = BOOT_TIMEOUT_MS) {
   const name = `car-usage-probe-${process.pid}-${Date.now()}`;
   try {
-    await tmuxAdapter.newSession(name);
+    await mkdir(SCRATCH_CWD, { recursive: true });
+    await tmuxAdapter.newSession(name, SCRATCH_CWD);
     // `command claude`, never the wrapped `claude` shell function — this must not spin up
     // its own monitored session (a monitor spawning a monitor of itself).
     await tmuxAdapter.sendKeys(name, 'command claude');

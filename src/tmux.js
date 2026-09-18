@@ -94,9 +94,12 @@ export function isInsideTmux() { return !!process.env.TMUX; }
 export function getCurrentPane() { return process.env.TMUX_PANE || null; }
 
 // A disposable, invisible session for session-reset.js's scratch probe — never attached,
-// never shown to the user. Small dimensions since nobody ever looks at it.
-export async function newDetachedSession(name, width = 120, height = 40) {
-  await execFileAsync('tmux', ['new-session', '-d', '-s', name, '-x', String(width), '-y', String(height)]);
+// never shown to the user. Small dimensions since nobody ever looks at it. cwd matters:
+// Claude Code's first-run trust dialog is keyed by directory, so launching in whatever
+// directory the caller happens to have as its own cwd would hit that prompt in a fresh
+// (and unrelated) folder every time it differs — see session-reset.js's fixed scratch cwd.
+export async function newDetachedSession(name, cwd, width = 120, height = 40) {
+  await execFileAsync('tmux', ['new-session', '-d', '-s', name, '-c', cwd, '-x', String(width), '-y', String(height)]);
 }
 
 export async function killSession(name) {

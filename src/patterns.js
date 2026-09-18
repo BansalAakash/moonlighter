@@ -791,20 +791,25 @@ export function isInternalRetry(text) {
     .some((l) => INTERNAL_RETRY_PATTERNS.some((p) => p.test(l)));
 }
 
-// Is the input box empty right now? Used to gate the /status probe (see monitor.js's
-// checkSessionResetPanel): that probe types "/status" into the pane, so it must never fire
-// while the user has an in-progress, unsent prompt sitting in the box — that keystroke would
-// land in the middle of their text. Bare "❯" (or ">") with nothing after it is empty; the
-// same glyph with anything trailing it is not. Scoped to the last few lines (the box is
-// always at the bottom) so a quoted "❯" earlier in scrollback can't produce a false read in
-// either direction; no prompt row found at all is treated as NOT safe (fail closed).
+// Is the input box empty right now? Used by session-reset.js's scratch probe to know when
+// its own throwaway session has finished booting and it's safe to type "/status" — a
+// premature send would land in the middle of Claude Code's own startup rendering instead
+// of a real prompt. Bare "❯" (or ">") with nothing after it is empty; the same glyph with
+// anything trailing it is not — EXCEPT Claude Code's own ghost placeholder ("❯ Try "fix
+// typecheck errors""), which only ever appears in a genuinely empty box on a brand-new
+// session (exactly what the scratch probe always is) and must not read as occupied, or
+// boot-detection never succeeds and every probe times out. Scoped to the last few lines
+// (the box is always at the bottom) so a quoted "❯" earlier in scrollback can't produce a
+// false read in either direction; no prompt row found at all is treated as NOT safe (fail
+// closed).
 const EMPTY_PROMPT_ROW = /^\s*[❯>]\s*$/;
+const PLACEHOLDER_HINT_ROW = /^\s*[❯>]\s*Try\s+["“]/;
 const OCCUPIED_PROMPT_ROW = /^\s*[❯>]\s*\S/;
 const INPUT_BOX_SCAN_LINES = 8;
 export function isInputBoxEmpty(text) {
   const lines = stripAnsi(text).split('\n');
   for (let i = lines.length - 1; i >= Math.max(0, lines.length - INPUT_BOX_SCAN_LINES); i--) {
-    if (EMPTY_PROMPT_ROW.test(lines[i])) return true;
+    if (EMPTY_PROMPT_ROW.test(lines[i]) || PLACEHOLDER_HINT_ROW.test(lines[i])) return true;
     if (OCCUPIED_PROMPT_ROW.test(lines[i])) return false;
   }
   return false;

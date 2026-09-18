@@ -1065,6 +1065,13 @@ describe('isInputBoxEmpty', () => {
   it('false (fail closed) when no prompt row is found at all', () => {
     assert.equal(isInputBoxEmpty('✻ Cogitating… (esc to interrupt)\nsome transcript line'), false);
   });
+  // A brand-new session (always true of session-reset.js's scratch probe) shows a ghost
+  // suggestion in the box — genuinely empty, not something the user typed. Missing this
+  // made every scratch-probe boot-detection time out (#session-reset.js incident).
+  it('true for the "Try ..." placeholder hint on a fresh session', () => {
+    assert.equal(isInputBoxEmpty(footer.replace('❯ ', '❯ Try "how does <filepath> work?"')), true);
+    assert.equal(isInputBoxEmpty(footer.replace('❯ ', '❯ Try "fix typecheck errors"')), true);
+  });
   it('is not fooled by a quoted "❯" earlier in a long capture', () => {
     const lines = Array.from({ length: 20 }, (_, i) => `transcript line ${i}`);
     lines[3] = '❯ some quoted example from a doc';

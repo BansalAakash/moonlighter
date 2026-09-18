@@ -6,17 +6,25 @@ import { tmpdir } from 'node:os';
 import { getSessionResetAt, invalidateSessionResetCache, probeViaScratchSession } from '../src/session-reset.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 
-function mockScratchTmux(paneContentAfterNav = '') {
+// `paneContent` is either a fixed string (every capture returns it) or a function of the
+// capture call count (1-indexed) — the latter simulates the pane's content changing over
+// time, e.g. a dialog that's there for the first couple of polls and then isn't.
+function mockScratchTmux(paneContent = '') {
+  let captureCalls = 0;
   const t = {
     _newSessions: [],
+    _newSessionCwds: [],
     _killedSessions: [],
     _sent: [],
     _keys: [],
-    newSession: async (name) => { t._newSessions.push(name); },
+    newSession: async (name, cwd) => { t._newSessions.push(name); t._newSessionCwds.push(cwd); },
     killSession: async (name) => { t._killedSessions.push(name); },
     sendKeys: async (_target, text) => { t._sent.push(text); },
     sendKey: async (_target, key) => { t._keys.push(key); },
-    capturePane: async () => paneContentAfterNav,
+    capturePane: async () => {
+      captureCalls++;
+      return typeof paneContent === 'function' ? paneContent(captureCalls) : paneContent;
+    },
   };
   return t;
 }
@@ -64,6 +72,28 @@ describe('probeViaScratchSession', () => {
     t.sendKey = async () => { throw new Error('tmux exploded'); }; // fails navigating to Usage
     await assert.rejects(() => probeViaScratchSession(t, DEFAULT_CONFIG));
     assert.equal(t._killedSessions.length, 1);
+  });
+
+  it('launches in the fixed scratch cwd, not whatever cwd the caller has', async () => {
+    const t = mockScratchTmux(USAGE_PANEL);
+    await probeViaScratchSession(t, DEFAULT_CONFIG);
+    assert.match(t._newSessionCwds[0], /scratch-probe-cwd$/);
+  });
+
+  it("accepts the first-run trust dialog once, then proceeds normally", async () => {
+    const TRUST_DIALOG = [
+      'Quick safety check: Is this a project you created or one you trust?',
+      '❯ No, exit',
+      '  Yes, I trust this folder',
+      'Enter to confirm · Esc to cancel',
+    ].join('\n');
+    // Dialog for the first 2 polls (boot + one retry), then a normal idle prompt from then on.
+    const t = mockScratchTmux((n) => (n <= 2 ? TRUST_DIALOG : USAGE_PANEL));
+    const resetAt = await probeViaScratchSession(t, DEFAULT_CONFIG);
+    assert.ok(resetAt > Date.now());
+    // Down (to "Yes, I trust this folder") + Enter to accept it, sent exactly once.
+    assert.deepEqual(t._keys.slice(0, 2), ['Down', 'Enter']);
+    assert.deepEqual(t._keys.slice(2), ['Right', 'Right'], 'navigation keys still follow, unduplicated');
   });
 });
 
