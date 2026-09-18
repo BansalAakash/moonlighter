@@ -691,7 +691,7 @@ describe('session-reset check (/status probe)', () => {
     assert.equal(result, 'session-reset-learned');
     assert.ok(s.sessionResetAt > Date.now());
     assert.deepEqual(t._sent, ['/status']);
-    assert.deepEqual(t._keys, ['Right', 'Right', 'Right', 'Escape']);
+    assert.deepEqual(t._keys, ['Right', 'Right', 'Escape']);
   });
 
   it('when enabled, does NOT probe while the input box has an in-progress prompt', async () => {

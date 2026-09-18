@@ -175,7 +175,10 @@ function correctUsageWait(state, stripped, config) {
 async function probeSessionReset(tmuxAdapter, pane, config) {
   await tmuxAdapter.sendKeys(pane, '/status');
   await new Promise((r) => setTimeout(r, 400));
-  for (let i = 0; i < 3; i++) {
+  // Tabs are Settings, Status, Config, Usage, Stats — /status opens on Status, so two
+  // Right presses (not three: verified live, an easy off-by-one to make counting the
+  // header row) land on Usage, which is what has the reset line.
+  for (let i = 0; i < 2; i++) {
     await tmuxAdapter.sendKey(pane, 'Right');
     await new Promise((r) => setTimeout(r, 150));
   }
