@@ -105,9 +105,11 @@ struct Session {
 
     /// Plain English, describing what the SESSION is doing — not what the daemon is doing.
     /// "monitoring" is true of the monitor and meaningless to someone who just wants to know
-    /// whether their work is still moving.
+    /// whether their work is still moving. Empty means nothing worth reporting: a session that
+    /// is simply running is the default, expected state, not a fact that earns a word next to
+    /// its name every single time you open the menu — only exceptions do.
     var headline: String {
-        if !autoResume { return "auto-resume off" }
+        if !autoResume { return "won't resume automatically" }
         if isStale { return "not being watched" }
         if status.gaveUp == true { return "stuck — needs you" }
         switch status.status {
@@ -120,9 +122,7 @@ struct Session {
         case "context":
             return "compacting, then resuming"
         default:
-            guard let d = sessionResetDeadline else { return "running" }
-            let pct = status.sessionUsedPercent.map { "\($0)% used · " } ?? ""
-            return "\(pct)resets in \(Self.short(d))"
+            return ""
         }
     }
 

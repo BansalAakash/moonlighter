@@ -63,6 +63,15 @@ enum SessionPrompt {
         }
     }
 
+    /// Discard a session's own prompt so it goes back to the shared one — the counterpart to
+    /// opening the editor. Without this, going back to shared meant hand-editing the file to
+    /// match the shared text exactly (pruneUnedited only deletes on an exact match), which is
+    /// not a real way to "set" anything.
+    static func revert(for session: Session) {
+        guard let f = file(for: session) else { return }
+        try? FileManager.default.removeItem(at: f)
+    }
+
     /// `usageLimitMessage` from ~/.claude-auto-retry.json, used to seed a new override. Parsed
     /// with JSONSerialization rather than a Decodable struct so an unrelated malformed key
     /// elsewhere in the file doesn't cost us the one string we want.

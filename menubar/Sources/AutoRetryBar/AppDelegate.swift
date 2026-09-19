@@ -63,47 +63,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sessions = full ? Snapshot.loadFull() : Snapshot.load()
         guard let button = statusItem?.button else { return }
 
-        let live = sessions.filter { $0.isLive }
-        let attention = live.filter { $0.health == .attention }
-        let waiting = live.filter { $0.health == .waiting }
-        let busy = live.filter { $0.health == .working }
-        let dead = sessions.filter { !$0.isLive }
-
-        // The mark is constant — it is the app's identity, and an icon that morphs is hard to
-        // find again in a crowded menu bar. State rides on the label next to it, plus colour
-        // for the one case that needs to interrupt you.
-        let image: NSImage
-        let label: String
-        if !attention.isEmpty {
-            image = Icon.attention
-            label = "\(attention.count)"
-        } else if !busy.isEmpty {
-            image = Icon.normal
-            label = "…"                                   // compacting / backing off
-        } else if let soonest = waiting.compactMap({ $0.deadline }).min() {
-            image = Icon.normal
-            label = Session.short(soonest)                // "3h12m"
-        } else if let soonest = live.compactMap({ $0.sessionResetDeadline }).min() {
-            // No active incident, but a passively-learned reset time is available (see
-            // sessionResetDeadline) — show it too. The whole point of that field is that the
-            // countdown doesn't disappear just because nothing is currently wrong.
-            image = Icon.normal
-            label = Session.short(soonest)
-        } else if !live.isEmpty {
-            image = Icon.normal
-            label = live.count > 1 ? "\(live.count)" : ""
-        } else {
-            // Nothing being watched — whether that is "no sessions" or "monitors died" is a
-            // distinction the menu makes; the bar just recedes.
-            image = Icon.dimmed
-            label = dead.isEmpty ? "" : "!"
-        }
+        let (image, label) = Self.face(for: sessions)
 
         button.image = image
         button.imagePosition = label.isEmpty ? .imageOnly : .imageLeading
         button.title = label.isEmpty ? "" : " \(label)"
 
         if isMenuOpen, let menu = statusItem?.menu { rebuild(menu) }
+    }
+
+    /// What the bar shows for a set of sessions: the mark plus the text beside it. Static so
+    /// `--dump` can print exactly what the live bar computes.
+    ///
+    /// The mark is constant — it is the app's identity, and an icon that morphs is hard to
+    /// find again in a crowded menu bar. State rides on the label next to it, plus colour
+    /// for the one case that needs to interrupt you.
+    static func face(for sessions: [Session]) -> (NSImage, String) {
+        let live = sessions.filter { $0.isLive }
+        let attention = live.filter { $0.health == .attention }
+        let waiting = live.filter { $0.health == .waiting }
+        let busy = live.filter { $0.health == .working }
+        let dead = sessions.filter { !$0.isLive }
+
+        if !attention.isEmpty { return (Icon.attention, "\(attention.count)") }
+        if !busy.isEmpty { return (Icon.normal, "…") }                       // compacting / backing off
+        if let soonest = waiting.compactMap({ $0.deadline }).min() {
+            return (Icon.normal, Session.short(soonest))                     // "3h12m"
+        }
+        // No active incident, but the passively-learned account-wide usage is available (see
+        // sessionResetDeadline). Shown once here, not per session, so it never disappears just
+        // because nothing is wrong.
+        if let s = live.filter({ $0.sessionResetDeadline != nil })
+            .min(by: { $0.sessionResetDeadline! < $1.sessionResetDeadline! }) {
+            let d = s.sessionResetDeadline!
+            if let used = s.status.sessionUsedPercent {
+                return (Icon.normal, "\(max(0, 100 - used))% left · \(Session.short(d))")
+            }
+            return (Icon.normal, Session.short(d))
+        }
+        if !live.isEmpty { return (Icon.normal, live.count > 1 ? "\(live.count)" : "") }
+        // Nothing being watched — whether that is "no sessions" or "monitors died" is a
+        // distinction the menu makes; the bar just recedes.
+        return (Icon.dimmed, dead.isEmpty ? "" : "!")
     }
 
     // MARK: - Menu
@@ -116,18 +117,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuDidClose(_ menu: NSMenu) { isMenuOpen = false }
 
-    /// The whole menu: what each session is doing, one checkbox per session for whether it
-    /// resumes after a limit, what happened last, and two app settings. The reconcile timer
-    /// is deliberately absent — it is plumbing, not a preference — and the repair action
-    /// lives behind the Option key rather than in front of someone who only wants to know
-    /// whether their work is still moving.
+    /// The whole menu: one plain-language line per session (its controls tucked in a submenu,
+    /// see sessionSubmenu), what happened last, and two app settings. The reconcile timer is
+    /// deliberately absent — it is plumbing, not a preference — and the repair action lives
+    /// behind the Option key rather than in front of someone who only wants to know whether
+    /// their work is still moving.
     private func rebuild(_ menu: NSMenu) {
         menu.removeAllItems()
-        // Drop seeded-but-unedited session prompts before drawing, so "Custom prompt" is
+        // Drop seeded-but-unedited session prompts before drawing, so "Custom Prompt" is
         // unticked for a session that only ever had the editor opened on it.
         SessionPrompt.pruneUnedited(sessions)
 
-        // 1. Every Claude session, what it is doing, and its one setting.
+        // 1. Every Claude session and what it is doing right now.
         if sessions.isEmpty {
             let empty = NSMenuItem(title: "No Claude sessions running", action: nil, keyEquivalent: "")
             empty.isEnabled = false
@@ -135,22 +136,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             for session in sessions {
                 menu.addItem(sessionItem(session))
-                // An indented second line per session, rather than the held-Option alternate
-                // this started as. Hiding it behind a modifier kept the menu shorter, but a
-                // per-session prompt is no use if nothing tells you it exists. It earns the
-                // line by reporting STATE as well as offering the action — which prompt this
-                // session will actually be sent is not otherwise visible anywhere.
-                if session.claudePid != nil {
-                    let item = NSMenuItem(title: "Custom prompt",
-                                          action: #selector(editSessionPrompt(_:)), keyEquivalent: "")
-                    item.target = self
-                    item.representedObject = session
-                    item.indentationLevel = 1
-                    item.state = SessionPrompt.isCustom(for: session) ? .on : .off
-                    item.toolTip = "Click to edit what this session is sent when it resumes. "
-                                 + "Unchanged from the shared prompt means it just uses that."
-                    menu.addItem(item)
-                }
             }
         }
 
@@ -193,18 +178,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add(menu, "Quit", #selector(quit), key: "q")
     }
 
-    /// One line per session: what it is doing, and a checkmark for the only per-session
-    /// setting there is — whether it gets picked back up after a limit resets. Clicking
-    /// toggles that.
+    /// One line per session, purely informational: what it is doing, and (via the checkmark)
+    /// whether it will be picked back up automatically. Nothing here is a click target — a row
+    /// whose visible text is "Custom printer utility — running" gave no hint that clicking it
+    /// actually flipped an unrelated setting, which is exactly the kind of thing a first-time
+    /// user has no way to guess. The actual controls live one level down, in the submenu, each
+    /// spelled out as a full sentence rather than a term ("auto-resume") nobody was told the
+    /// meaning of.
     private func sessionItem(_ s: Session) -> NSMenuItem {
-        let item = NSMenuItem(title: "\(s.displayName) — \(s.headline)",
-                              action: #selector(toggleAutoResume(_:)), keyEquivalent: "")
-        item.target = self
-        item.representedObject = s
+        let title = s.headline.isEmpty ? s.displayName : "\(s.displayName) — \(s.headline)"
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.state = s.autoResume ? .on : .off
-        item.toolTip = s.autoResume
-            ? "Resuming automatically after limits reset. Click to stop."
-            : "Left alone. Click to resume it automatically after limits reset."
         if s.health == .attention {
             // The one state that should catch the eye. Colour is an addition to the wording,
             // never the only carrier of it — "stuck — needs you" already says so.
@@ -212,7 +196,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 string: item.title,
                 attributes: [.foregroundColor: NSColor.systemRed])
         }
+        item.submenu = sessionSubmenu(s)
         return item
+    }
+
+    /// This session's controls, spelled out as sentences a first-time user can act on without
+    /// having read a README: whether it resumes itself, and (only once there's a Claude process
+    /// to send a prompt to) which prompt it gets and a one-click way back to the shared one.
+    private func sessionSubmenu(_ s: Session) -> NSMenu {
+        let sub = NSMenu()
+
+        let resume = NSMenuItem(title: "Continue Automatically When Limit Resets",
+                                action: #selector(toggleAutoResume(_:)), keyEquivalent: "")
+        resume.target = self
+        resume.representedObject = s
+        resume.state = s.autoResume ? .on : .off
+        sub.addItem(resume)
+
+        if s.claudePid != nil {
+            sub.addItem(.separator())
+            let isCustom = SessionPrompt.isCustom(for: s)
+            let prompt = NSMenuItem(title: isCustom ? "Custom Prompt" : "Shared Prompt",
+                                    action: #selector(editSessionPrompt(_:)), keyEquivalent: "")
+            prompt.target = self
+            prompt.representedObject = s
+            prompt.state = isCustom ? .on : .off
+            prompt.toolTip = isCustom
+                ? "This session is sent its own prompt, not the shared one, when it resumes. "
+                + "Click to edit it."
+                : "This session is sent the shared prompt when it resumes. Click to give it its own."
+            sub.addItem(prompt)
+
+            // Only offered once a session actually IS customised — the way back to the shared
+            // prompt, without having to know (or retype) its exact text.
+            if isCustom {
+                let revert = NSMenuItem(title: "Use Shared Prompt Instead",
+                                        action: #selector(revertSessionPrompt(_:)), keyEquivalent: "")
+                revert.target = self
+                revert.representedObject = s
+                revert.toolTip = "Discard this session's own prompt; it goes back to the shared one."
+                sub.addItem(revert)
+            }
+        }
+
+        return sub
     }
 
     // MARK: - Actions
@@ -245,6 +272,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func editSessionPrompt(_ sender: NSMenuItem) {
         guard let s = sender.representedObject as? Session else { return }
         Controller.openSessionPrompt(s)
+    }
+
+    @objc private func revertSessionPrompt(_ sender: NSMenuItem) {
+        guard let s = sender.representedObject as? Session else { return }
+        SessionPrompt.revert(for: s)
+        refresh(full: true)
     }
 
     @objc private func openConfig() { Controller.openConfig() }

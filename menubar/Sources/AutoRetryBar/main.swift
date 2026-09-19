@@ -49,6 +49,7 @@ if CommandLine.arguments.contains("--dump") {
     print("timer      : \(Controller.timerInstalled ? "installed" : "not installed")")
     print("login item : \(Controller.launchAtLoginDescription)")
     print("sessions   : \(sessions.count)")
+    print("bar label  : \"\(AppDelegate.face(for: sessions).1)\"")
     for s in sessions {
         print("""
 

@@ -157,10 +157,9 @@ enum Controller {
     private static let logDateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
-        // The monitor names its log from `new Date().toISOString()`, which is UTC — so the
-        // "today" file can differ from local-midnight today. Matching that keeps the app
-        // pointed at the file actually being appended to.
-        f.timeZone = TimeZone(identifier: "UTC")
+        // src/logger.js names (and rolls over) the log file at LOCAL midnight, not UTC —
+        // leaving this on the system default timezone is what keeps it pointed at the file
+        // actually being appended to.
         return f
     }()
 
@@ -207,14 +206,13 @@ enum Controller {
 
     /// "[2026-09-07 02:49:30] [INFO] Sent retry message" → the date, and just the message.
     ///
-    /// UTC, because src/logger.js stamps lines with `new Date().toISOString()`. Leaving the
-    /// formatter on the system zone silently reads that as local time, which is not a parse
-    /// failure — it is a plausible-looking date that is off by the user's UTC offset, so the
-    /// age it produces is wrong by hours without ever looking wrong.
+    /// Local time, because src/logger.js stamps lines that way (see logDateFormatter above).
+    /// Pinning this to UTC instead would silently misread every timestamp — not a parse
+    /// failure, but a plausible-looking date wrong by the user's UTC offset, so the "age" it
+    /// produces is wrong by hours without ever looking wrong.
     private static let stampParser: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        f.timeZone = TimeZone(identifier: "UTC")
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
@@ -233,10 +231,10 @@ enum Controller {
 
     /// The most recent thing that happened TO THE WORK, or nil if nothing has.
     ///
-    /// Yesterday's file is searched too. Logs are named by UTC date, so for anyone east of
-    /// Greenwich the small hours of a local morning — exactly when an overnight retry fires —
-    /// land in the previous file, and looking only at "today" would hide the one event the
-    /// user opens this menu to check. Scanned from the end; these files rotate daily.
+    /// Yesterday's file is searched too, as a safety margin around the local-midnight
+    /// rollover itself — a look right at the boundary should not come up empty just because
+    /// the daemon rolled the file over a moment earlier or later than this read. Scanned from
+    /// the end; these files rotate daily.
     static func lastEvent() -> Event? {
         for daysAgo in 0...1 {
             guard let text = try? String(contentsOf: log(daysAgo: daysAgo), encoding: .utf8) else { continue }
