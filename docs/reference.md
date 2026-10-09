@@ -113,7 +113,7 @@ automates the wait-and-retry for all of them.
 |--------|---------|
 | N-hour limit | `5-hour limit reached - resets 3pm (UTC)` |
 | Session limit | `You've hit your session limit · resets 2am (Europe/Zurich)` |
-| Weekly limit | `You've hit your weekly limit · resets Oct 9, 10am` |
+| Weekly limit | `You've hit your weekly limit · resets Oct 9, 10am` — the date is read, so the wait is days, not the next 10am |
 | Usage limit | `Claude usage limit reached. Resets at 2pm` |
 | Out of extra usage | `You're out of extra usage · resets 3pm` |
 | Try again | `Please try again in 5 hours` |
@@ -186,7 +186,7 @@ Optional. Create `~/.claude-auto-retry.json`:
 | `retryMessage` | `"Continue where..."` | Message sent to Claude on retry |
 | `customPatterns` | `[]` | Additional regex patterns to detect rate limits |
 
-All fields optional. Invalid values fall back to defaults automatically.
+All fields optional. Invalid values fall back to defaults automatically. This fork adds keys not listed in the table above — `usageLimitMessage`, `contextLimit`, `sessionResetCheck` and `inputBox` — documented in the main [README](../README.md). The file is re-read while a monitor runs (no restart needed); if it stops being valid JSON the last good settings stay in force and a warning is logged.
 
 ### Launch wrapper
 
@@ -252,7 +252,7 @@ paths never collide; usage limits always take precedence.
 > `API Error: 529` (e.g. editing this tool, or docs about Claude errors) will match —
 > set `"enabled": false` while doing that. (Earlier versions matched bare status
 > numbers across the whole capture, which injected spurious retries during ordinary
-> web-dev sessions.) For a structured, ambiguity-free trigger see `DESIGN-NOTES.md`.
+> web-dev sessions.) For a structured, ambiguity-free trigger see [upstream's DESIGN-NOTES.md](https://github.com/cheapestinference/claude-auto-retry/blob/master/DESIGN-NOTES.md).
 
 Configured under an `overload` block (shown with its defaults):
 
@@ -305,7 +305,7 @@ pane-keyed marker the monitor consumes — no terminal scraping, so it cannot
 false-positive on code or scrollback. Sessions launched via the wrapper **after**
 installing the hook use it automatically; the first marker latches event mode and
 disables the scraper for that session. Sessions without the hook (or pre-install) fall
-back to the anchored scraper. Remove with `uninstall-hook`. See `DESIGN-NOTES.md` for
+back to the anchored scraper. Remove with `uninstall-hook`. See [upstream's DESIGN-NOTES.md](https://github.com/cheapestinference/claude-auto-retry/blob/master/DESIGN-NOTES.md) for
 the architecture.
 
 > **Why not `rate_limit`?** The event path handles only *transient overloads*
@@ -444,7 +444,7 @@ default `pollIntervalSeconds`) keeps the overload countdown responsive.
 ```bash
 claude-auto-retry install          # Install shell wrapper + tmux
 claude-auto-retry uninstall        # Remove shell wrapper
-claude-auto-retry status           # Show monitor activity + last log entries
+claude-auto-retry status           # Show each monitored session + last log entries
 claude-auto-retry logs             # Tail today's log file in real-time
 claude-auto-retry version          # Print version
 
@@ -539,7 +539,7 @@ pruned, since staleness can't be detected). Prefer the PID form; you can also ha
 |-------|--------|
 | bash | Full (auto-install to `~/.bashrc`) |
 | zsh | Full (auto-install to `~/.zshrc`) |
-| fish | Manual setup (instructions printed on `install`) |
+| fish | Full (installed as `~/.config/fish/functions/claude.fish`; an existing file that isn't ours is never overwritten) |
 
 ## `--print` Mode
 
@@ -573,7 +573,7 @@ claude-auto-retry uninstall
 npm uninstall -g claude-auto-retry
 ```
 
-This removes the shell function from your rc files. tmux is left installed.
+This removes the shell function from your rc files (and fish's `functions/claude.fish`, if it is ours). tmux is left installed.
 
 ## Known Limitations
 
@@ -592,7 +592,7 @@ Contributions are welcome! Here's how to get started:
 ```bash
 git clone https://github.com/cheapestinference/claude-auto-retry.git
 cd claude-auto-retry
-npm test            # Run all 128 tests
+npm test            # Run the full suite
 npm link            # Install locally for testing
 ```
 
@@ -605,13 +605,17 @@ claude-auto-retry/
 │   ├── patterns.js         # Rate limit + overload detection + ANSI stripping
 │   ├── time-parser.js      # Reset time parsing with timezone support
 │   ├── config.js           # Config loading + validation
-│   ├── logger.js           # File-based logging with rotation
+│   ├── logger.js           # File-based logging with rotation (+ the local-date log filename)
+│   ├── status-report.js    # `status`: per-session lines from the monitors' snapshots
+│   ├── session-reset.js    # Passive /status probe (menu bar countdown), with a cross-process lock
+│   ├── session-prompt.js   # Per-session resume-prompt override
 │   ├── tmux.js             # tmux command wrappers (execFile-based)
 │   ├── monitor.js          # Core monitoring loop + retry logic (usage + overload paths)
 │   ├── events.js           # StopFailure hook event channel (scrape-free overload trigger)
 │   ├── reconcile.js        # Re-arm monitors for all live claude panes + exclusion
 │   ├── launcher.js         # Process orchestration + signal forwarding
-│   └── wrapper.sh          # Shell function template
+│   ├── wrapper.sh          # Shell function template (bash/zsh)
+│   └── wrapper.fish        # Shell function template (fish)
 ├── systemd/                # systemd --user units for the reconcile timer (Linux)
 ├── launchd/                # LaunchAgent plist for the reconcile timer (macOS)
 ├── test/                   # tests across the src modules

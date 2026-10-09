@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -8,6 +8,8 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { writeStopFailureEvent, isRetryableError } from '../src/events.js';
 import { sweepStaleStatus } from '../src/status-file.js';
+import { todayLogFile } from '../src/logger.js';
+import { readAllSnapshots, renderSessionLines } from '../src/status-report.js';
 import { reconcile, excludeSelf, parseRunningMonitors, PGREP_LIST_FLAG } from '../src/reconcile.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -15,11 +17,20 @@ const __dirname = dirname(__filename);
 const SRC_DIR = join(__dirname, '..', 'src');
 const LAUNCHER_PATH = join(SRC_DIR, 'launcher.js');
 const WRAPPER_TEMPLATE = join(SRC_DIR, 'wrapper.sh');
+const FISH_WRAPPER_TEMPLATE = join(SRC_DIR, 'wrapper.fish');
 
 export const MARKER_START = '# >>> claude-auto-retry >>>';
 export const MARKER_END = '# <<< claude-auto-retry <<<';
 
 // --- Wrapper injection ---
+
+// The launcher path is spliced into a double-quoted string in the generated shell code, so
+// the characters that are live inside double quotes must be escaped — and the substitution
+// itself must use a replacer FUNCTION, because String.replace treats `$&`, `$1`, `$'` in a
+// replacement STRING as patterns and would silently mangle a path containing them.
+export function escapeForDoubleQuotes(path) {
+  return path.replace(/[\\"$`]/g, '\\$&');
+}
 
 export async function injectWrapper(rcFile, launcherPath) {
   let content = '';
@@ -30,7 +41,7 @@ export async function injectWrapper(rcFile, launcherPath) {
   }
 
   const template = await readFile(WRAPPER_TEMPLATE, 'utf-8');
-  const wrapper = template.replace(/__LAUNCHER_PATH__/g, launcherPath);
+  const wrapper = template.replace(/__LAUNCHER_PATH__/g, () => escapeForDoubleQuotes(launcherPath));
 
   // Remove existing wrapper if present
   const startIdx = content.indexOf(MARKER_START);
@@ -64,6 +75,36 @@ export async function removeWrapper(rcFile) {
   const after = content.slice(endIdx + MARKER_END.length).trimStart();
   content = before + (after ? '\n' + after : '\n');
   await writeFile(rcFile, content);
+}
+
+// --- fish ---
+// fish has no rc-file wrapper to splice into: functions autoload from functions/<name>.fish,
+// so the wrapper is a file of its own. It is only ever written or removed when it is OURS
+// (carries the marker) — an existing claude.fish the user wrote is left alone.
+
+export function fishWrapperPath(env = process.env) {
+  return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'fish', 'functions', 'claude.fish');
+}
+
+// 'written' | 'foreign' (a claude.fish that is not ours exists; untouched)
+export async function injectFishWrapper(file, launcherPath) {
+  try {
+    const existing = await readFile(file, 'utf-8');
+    if (!existing.includes(MARKER_START)) return 'foreign';
+  } catch { /* absent — create it */ }
+  const template = await readFile(FISH_WRAPPER_TEMPLATE, 'utf-8');
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, template.replace(/__LAUNCHER_PATH__/g, () => escapeForDoubleQuotes(launcherPath)));
+  return 'written';
+}
+
+// 'removed' | 'foreign' | 'absent'
+export async function removeFishWrapper(file) {
+  let content;
+  try { content = await readFile(file, 'utf-8'); } catch { return 'absent'; }
+  if (!content.includes(MARKER_START)) return 'foreign';
+  await unlink(file);
+  return 'removed';
 }
 
 // --- tmux install ---
@@ -132,12 +173,9 @@ async function cmdInstall() {
   console.log('tmux OK');
 
   const shell = process.env.SHELL || '/bin/bash';
-  if (shell.includes('fish')) {
-    console.error('\nFish shell detected. Automatic install not supported.');
-    console.error(`Add manually to ~/.config/fish/config.fish:`);
-    console.error(`  function claude; set -x CLAUDE_AUTO_RETRY_ACTIVE 1; node "${LAUNCHER_PATH}" $argv; set -e CLAUDE_AUTO_RETRY_ACTIVE; end`);
-    process.exit(1);
-  }
+  const fishFile = fishWrapperPath();
+  // fish if it is the login shell, or if the user already has a fish config directory.
+  const useFish = shell.includes('fish') || existsSync(dirname(dirname(fishFile)));
 
   const rcFiles = [];
   const bashrc = join(homedir(), '.bashrc');
@@ -145,16 +183,27 @@ async function cmdInstall() {
 
   if (existsSync(bashrc) || shell.includes('bash')) rcFiles.push(bashrc);
   if (existsSync(zshrc) || shell.includes('zsh')) rcFiles.push(zshrc);
-  if (rcFiles.length === 0) rcFiles.push(bashrc);
+  // Never invent a ~/.bashrc for someone whose shell is fish.
+  if (rcFiles.length === 0 && !useFish) rcFiles.push(bashrc);
 
   for (const rc of rcFiles) {
     await injectWrapper(rc, LAUNCHER_PATH);
     console.log(`Shell function added to ${rc}`);
   }
+  if (useFish) {
+    if (await injectFishWrapper(fishFile, LAUNCHER_PATH) === 'written') {
+      console.log(`Shell function added to ${fishFile}`);
+    } else {
+      console.error(`\n${fishFile} already exists and is not ours; left untouched.`);
+      console.error('To use claude-auto-retry from fish, add this to your own claude function:');
+      console.error(`  env CLAUDE_AUTO_RETRY_ACTIVE=1 node "${LAUNCHER_PATH}" $argv`);
+    }
+  }
 
   console.log(`\nInstalled! Launcher path: ${LAUNCHER_PATH}`);
   console.log('\nRestart your shell or run:');
   for (const rc of rcFiles) { console.log(`  source ${rc}`); }
+  if (useFish) console.log('  (fish loads the new function in new shells automatically)');
   console.log('\nNote: If you switch Node versions (nvm), re-run: claude-auto-retry install');
 }
 
@@ -162,6 +211,9 @@ async function cmdUninstall() {
   const bashrc = join(homedir(), '.bashrc');
   const zshrc = join(homedir(), '.zshrc');
   for (const rc of [bashrc, zshrc]) { await removeWrapper(rc); }
+  if (await removeFishWrapper(fishWrapperPath()) === 'foreign') {
+    console.log(`${fishWrapperPath()} is not ours; left untouched.`);
+  }
   // Best-effort GC of tmux-status snapshot files left behind by monitors that died
   // without cleaning up (SIGKILL, host sleep/crash) — see src/status-file.js. Failure
   // here must never block the uninstall itself.
@@ -170,9 +222,13 @@ async function cmdUninstall() {
 }
 
 async function cmdStatus() {
-  const logDir = join(homedir(), '.claude-auto-retry', 'logs');
-  const today = new Date().toISOString().split('T')[0];
-  const logFile = join(logDir, `${today}.log`);
+  // Per-session state first: it is the answer to "is it watching my work?", which the log
+  // cannot give (it only shows what happened, not what is being watched right now).
+  console.log('Monitored sessions:');
+  for (const line of renderSessionLines(await readAllSnapshots())) console.log(line);
+  console.log();
+
+  const logFile = todayLogFile();
   try {
     const content = await readFile(logFile, 'utf-8');
     const lines = content.trim().split('\n');
@@ -180,14 +236,12 @@ async function cmdStatus() {
     console.log('Last 10 entries:');
     console.log(lines.slice(-10).join('\n'));
   } catch {
-    console.log('No activity today. Log directory:', logDir);
+    console.log('No activity today. Log file would be:', logFile);
   }
 }
 
 async function cmdLogs() {
-  const logDir = join(homedir(), '.claude-auto-retry', 'logs');
-  const today = new Date().toISOString().split('T')[0];
-  const logFile = join(logDir, `${today}.log`);
+  const logFile = todayLogFile();
   if (!existsSync(logFile)) {
     console.log(`No log file for today: ${logFile}`);
     return;
@@ -206,13 +260,19 @@ async function cmdLogs() {
 
 const HOOK_MARKER = '_stopfailure-hook';
 
-function stopFailureHookEntry() {
+// Claude Code runs a hook's command through a shell, so a path with a space (or any other
+// shell metacharacter) has to be quoted or the hook silently never runs.
+export function shellQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+export function stopFailureHookEntry(scriptPath = __filename) {
   // Matcher filters on the StopFailure error type; only the transient-overload classes.
   // rate_limit is intentionally omitted — a session/usage limit is an hours-scale wait
   // owned by the scraper usage path, not a seconds-scale event retry (see src/events.js).
   return {
     matcher: 'overloaded|server_error',
-    hooks: [{ type: 'command', command: `node ${__filename} ${HOOK_MARKER}`, timeout: 5 }],
+    hooks: [{ type: 'command', command: `node ${shellQuote(scriptPath)} ${HOOK_MARKER}`, timeout: 5 }],
   };
 }
 
@@ -289,7 +349,7 @@ function launchAgentsDir() {
 // Substitute the node/CLI paths into a unit template. The template quotes the placeholders
 // (see the .service), so a path with spaces produces a valid quoted ExecStart.
 export function renderReconcileUnit(template, nodePath, cliPath) {
-  return template.replace(/__NODE_PATH__/g, nodePath).replace(/__CLI_PATH__/g, cliPath);
+  return template.replace(/__NODE_PATH__/g, () => nodePath).replace(/__CLI_PATH__/g, () => cliPath);
 }
 
 // launchd variant: the placeholders sit inside <string> elements, so the substituted
@@ -301,8 +361,8 @@ function xmlEscape(s) {
 
 export function renderReconcilePlist(template, nodePath, cliPath) {
   return template
-    .replace(/__NODE_PATH__/g, xmlEscape(nodePath))
-    .replace(/__CLI_PATH__/g, xmlEscape(cliPath));
+    .replace(/__NODE_PATH__/g, () => xmlEscape(nodePath))
+    .replace(/__CLI_PATH__/g, () => xmlEscape(cliPath));
 }
 
 // macOS: install the reconcile LaunchAgent into ~/Library/LaunchAgents and load it via
@@ -348,7 +408,7 @@ async function installTimerLaunchd() {
 async function uninstallTimerLaunchd() {
   const domain = `gui/${process.getuid()}`;
   try { execFileSync('launchctl', ['bootout', `${domain}/${LAUNCHD_LABEL}`], { stdio: 'ignore' }); } catch { /* not loaded — fine */ }
-  try { await (await import('node:fs/promises')).unlink(join(launchAgentsDir(), LAUNCHD_PLIST)); } catch { /* absent */ }
+  try { await unlink(join(launchAgentsDir(), LAUNCHD_PLIST)); } catch { /* absent */ }
   console.log('LaunchAgent removed. (Already-running monitors are unaffected.)');
 }
 
@@ -399,7 +459,7 @@ async function cmdUninstallTimer() {
   } catch { /* not enabled — fine */ }
   const dest = userUnitDir();
   for (const u of [UNIT_TIMER, UNIT_SERVICE]) {
-    try { await (await import('node:fs/promises')).unlink(join(dest, u)); } catch { /* absent */ }
+    try { await unlink(join(dest, u)); } catch { /* absent */ }
   }
   try { execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'inherit' }); } catch { /* ignore */ }
   console.log('Timer removed. (Already-running monitors are unaffected.)');

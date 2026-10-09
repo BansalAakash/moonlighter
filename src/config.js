@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -105,6 +105,16 @@ export const DEFAULT_SESSION_RESET_CHECK = {
   intervalMinutes: 10,
 };
 
+// What to do when the pane's input box already holds text (a half-typed draft) at the moment
+// a message is about to be typed. 'send' (the default, and the behaviour before this knob
+// existed) types it anyway — it is appended to the draft, and a warning is logged. 'wait'
+// holds off until the box is empty. Opt-in because the detection reads the pane as plain text,
+// and Claude Code's greyed-out prompt SUGGESTIONS are indistinguishable from typed text there:
+// holding on a suggestion would stall an unattended session, which is the worse failure.
+export const DEFAULT_INPUT_BOX = {
+  whenOccupied: 'send',
+};
+
 export const DEFAULT_CONFIG = {
   maxRetries: 5,
   pollIntervalSeconds: 5,
@@ -117,9 +127,10 @@ export const DEFAULT_CONFIG = {
   safeguard: DEFAULT_SAFEGUARD,
   contextLimit: DEFAULT_CONTEXT_LIMIT,
   sessionResetCheck: DEFAULT_SESSION_RESET_CHECK,
+  inputBox: DEFAULT_INPUT_BOX,
 };
 
-const CONFIG_PATH = join(homedir(), '.claude-auto-retry.json');
+export const CONFIG_PATH = join(homedir(), '.claude-auto-retry.json');
 
 function validNumber(val, min, fallback) {
   return typeof val === 'number' && Number.isFinite(val) && val >= min ? val : fallback;
@@ -201,6 +212,12 @@ function validateContextLimit(raw, usageLimitMessage) {
   return c;
 }
 
+function validateInputBox(raw) {
+  const o = { ...DEFAULT_INPUT_BOX, ...(raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) };
+  if (o.whenOccupied !== 'send' && o.whenOccupied !== 'wait') o.whenOccupied = DEFAULT_INPUT_BOX.whenOccupied;
+  return o;
+}
+
 function validate(cfg) {
   cfg.maxRetries = validNumber(cfg.maxRetries, 1, DEFAULT_CONFIG.maxRetries);
   cfg.pollIntervalSeconds = validNumber(cfg.pollIntervalSeconds, 1, DEFAULT_CONFIG.pollIntervalSeconds);
@@ -225,6 +242,7 @@ function validate(cfg) {
       delete cfg.foregroundCommands;
     }
   }
+  cfg.inputBox = validateInputBox(cfg.inputBox);
   cfg.overload = validateOverload(cfg.overload);
   cfg.safeguard = validateSafeguard(cfg.safeguard);
   // AFTER usageLimitMessage above: the null default resolves to it (see DEFAULT_CONTEXT_LIMIT).
@@ -232,15 +250,68 @@ function validate(cfg) {
   return cfg;
 }
 
-export async function loadConfig(path = CONFIG_PATH) {
+// { config, error }. `error` is set when the file EXISTS but cannot be used (unreadable, not
+// valid JSON, or not a JSON object) and is null for a missing file, which is simply "all
+// defaults". Either way `config` is a complete, validated config — the point of returning the
+// error alongside is that falling back to defaults must never be silent: a stray quote in a
+// hand-edited prompt used to revert every setting to its default with no trace anywhere.
+export async function loadConfigDetailed(path = CONFIG_PATH) {
+  let raw;
   try {
-    const raw = await readFile(path, 'utf-8');
-    return validate({ ...DEFAULT_CONFIG, ...JSON.parse(raw) });
-  } catch {
+    raw = await readFile(path, 'utf-8');
+  } catch (err) {
     // The no-config path runs validate() too. It used to return the raw defaults, which was
     // harmless only while every default was already its own final value; contextLimit's
     // retryMessage default is null ("reuse usageLimitMessage") and RESOLVES in validate, so
     // skipping it here handed the monitor a null message to type into the pane.
-    return validate({ ...DEFAULT_CONFIG });
+    return {
+      config: validate({ ...DEFAULT_CONFIG }),
+      error: err.code === 'ENOENT' ? null : `could not be read (${err.code || err.message})`,
+    };
   }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return { config: validate({ ...DEFAULT_CONFIG }), error: `is not valid JSON (${err.message})` };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { config: validate({ ...DEFAULT_CONFIG }), error: 'must contain a JSON object ({ ... })' };
+  }
+  return { config: validate({ ...DEFAULT_CONFIG, ...parsed }), error: null };
+}
+
+export async function loadConfig(path = CONFIG_PATH) {
+  return (await loadConfigDetailed(path)).config;
+}
+
+export async function configMtimeMs(path = CONFIG_PATH) {
+  try { return (await stat(path)).mtimeMs; } catch { return 0; }
+}
+
+// A long-lived monitor reads its config once, so editing ~/.claude-auto-retry.json (or using
+// the menu bar app's "Edit Shared Prompt…") changed nothing for sessions already running until
+// something restarted them. The reloader re-reads when the file's mtime moves, and — the part
+// that matters for a file people edit by hand — a bad edit KEEPS the last good config instead
+// of reverting to defaults, and says so.
+export async function createConfigReloader(path = CONFIG_PATH) {
+  const first = await loadConfigDetailed(path);
+  let config = first.config;
+  let mtime = await configMtimeMs(path);
+  return {
+    get config() { return config; },
+    startupError: first.error,
+    path,
+    // → { changed, error }. changed: a new config is now in effect. error: the file changed
+    // but could not be used, so the previous config stays.
+    async refresh() {
+      const m = await configMtimeMs(path);
+      if (m === mtime) return { changed: false, error: null };
+      mtime = m;
+      const next = await loadConfigDetailed(path);
+      if (next.error) return { changed: false, error: next.error };
+      config = next.config;
+      return { changed: true, error: null };
+    },
+  };
 }

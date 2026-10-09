@@ -29,28 +29,43 @@ fi
 # --- the CLI and the shell wrapper -------------------------------------------
 
 echo
-say "1/3  Linking the CLI"
+say "1/4  Linking the CLI"
 npm link >/dev/null
 echo "  claude-auto-retry -> $(pwd)"
 
 echo
-say "2/3  Installing the shell wrapper"
-# Checks/installs tmux, then adds a `claude` shell function to ~/.zshrc / ~/.bashrc
-# that launches Claude Code inside a tmux pane the monitor can watch.
+say "2/4  Installing the shell wrapper"
+# Checks/installs tmux, then adds a `claude` shell function (~/.zshrc / ~/.bashrc, or fish's
+# functions/claude.fish) that launches Claude Code inside a tmux pane the monitor can watch.
 claude-auto-retry install
+
+# --- the repair timer ----------------------------------------------------------
+
+echo
+say "3/4  Installing the repair timer"
+# Re-arms a monitor within 5 minutes of it dying. Idempotent. The macOS menu bar app keeps this
+# installed too, but it is not the only way in: Linux has no menu bar app, and a Mac without
+# Swift skips it — both used to be left without self-healing. Failure here (no systemd --user
+# session, say) must not abort the rest of the install.
+if claude-auto-retry install-timer >/dev/null 2>&1; then
+    echo "  Installed: a dead monitor is re-armed within 5 minutes."
+else
+    warn "  Could not install the timer (run \`claude-auto-retry install-timer\` to see why)."
+    warn "  Monitors still work; one that dies stays dead until \`claude-auto-retry reconcile\`."
+fi
 
 # --- the menu bar app (macOS only) -------------------------------------------
 
 echo
 if [ "$(uname -s)" != "Darwin" ]; then
-    say "3/3  Menu bar app — skipped (macOS only)"
+    say "4/4  Menu bar app — skipped (macOS only)"
     echo "  The CLI works on Linux; the status bar app does not."
 elif ! command -v swift >/dev/null; then
-    say "3/3  Menu bar app — skipped"
+    say "4/4  Menu bar app — skipped"
     warn "  Swift not found. Install Xcode Command Line Tools and re-run:"
     warn "      xcode-select --install"
 else
-    say "3/3  Building the menu bar app"
+    say "4/4  Building the menu bar app"
     ./menubar/Scripts/build_app.sh
     # Quit a running copy first: cp -R over a live bundle leaves a mangled app.
     pkill -x AutoRetryBar 2>/dev/null || true
@@ -59,7 +74,7 @@ else
     cp -R menubar/AutoRetryBar.app /Applications/
     open -a /Applications/AutoRetryBar.app
     echo "  Installed to /Applications and launched."
-    echo "  It installs its own 5-minute repair timer and asks to open at login."
+    echo "  It keeps the repair timer installed and asks to open at login."
 
     # Watchdog: relaunches AutoRetryBar if it's not running, and force-restarts it if it's
     # running but its heartbeat has stopped (stuck, not crashed — a plain pgrep or launchd

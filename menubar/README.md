@@ -6,6 +6,7 @@ Code session is doing, and act on it, without attaching to a single tmux pane.
 ```
 ✳ 2          two sessions monitored, both idle
 ✳ 3h12m      one is waiting out a usage limit; that is the soonest reset
+✳ 3d4h       ...a weekly limit: waits past two days read in days
 ✳ …          a session is compacting or backing off
 ✳ 1  (red)   a monitor gave up — it needs you
 ✳ (dimmed)   nothing is being monitored
@@ -26,28 +27,35 @@ reasons unrelated to the monitor. The pid is needed to *act* on a monitor, not t
 
 ## What it can do
 
-The menu is four lines. Anything that would always be switched on is not a choice:
+The menu is a handful of lines. Anything that would always be switched on is not a choice:
 
 ```
-✓ Custom printer utility application — running    ← resume this one after a limit?
-    Custom prompt                                 ← ticked once you actually edit it
-✓ Claude-auto-retry review — resumes in 3h12m
-    Custom prompt
-  Scratch experiment — auto-resume off
+✓ Custom printer utility application — resumes in 3h12m   ▸   ← one line per session;
+✓ Claude-auto-retry review                                 ▸     its controls are the submenu
+  Scratch experiment — won't resume automatically          ▸
 ───────────────────────────────
-06:21  Sent retry message (attempt 1)   ← last thing that happened to your work;
-                                           absent on a quiet day. Click for the log
-Edit Continuation Prompt…               ← hold ⌥ to swap this for "Fix Monitoring"
+7h ago  ·  Sent retry message (attempt 1)   ← last thing that happened to your work;
+                                              "Open Log…" on a quiet day
+Edit Shared Prompt…                         ← hold ⌥ to swap this for "Fix Monitoring"
 ───────────────────────────────
 ✓ Open at Login
 Quit
+```
+
+A session's submenu holds its controls, each spelled out as a sentence:
+
+```
+✓ Continue Automatically When Limit Resets     ← the one per-session setting
+─────────────────────────────────
+  Shared Prompt  /  ✓ Custom Prompt            ← click to edit; ticked once it really differs
+  Use Shared Prompt Instead                    ← only offered once a session has its own
 ```
 
 The session line is the whole status display: `running`, `resumes in 3h12m`,
 `compacting, then resuming`, `API busy — retrying`, or `stuck — needs you` (red). Sessions
 whose tmux pane no longer exists are not listed at all — a leftover status file is not news.
 
-**The checkbox is the per-session setting, and there is only one.** Unticking it runs
+**"Continue Automatically When Limit Resets" is the per-session setting, and there is only one.** Unticking it runs
 `exclude-self` for that pane, which records the session by claude PID — the self-expiring
 form, so the entry dies with the session and can never mute a later one that inherits the
 pid — and stops its monitor. That is what the 5-minute reconcile consults, so OFF sticks
@@ -89,8 +97,9 @@ wrong call: a per-session prompt is no use if nothing tells you it exists. It ea
 by reporting state, not just offering an action — which prompt a session gets is not visible
 anywhere else.
 
-**Hold ⌥ to reveal "Fix Monitoring"** — restarts every monitor. That is also how an edit to
-the package's JavaScript takes effect, since monitors load their code at start.
+**Hold ⌥ to reveal "Fix Monitoring"** — restarts every monitor. That is how an edit to the
+package's JavaScript takes effect, since monitors load their code at start. (Edits to
+`~/.claude-auto-retry.json` do *not* need it: monitors re-read that file while running.)
 
 Anything beyond this is a CLI job: `claude-auto-retry reconcile`, `exclude-self`, `logs`.
 Actions here shell out to that same CLI rather than reimplementing it, so `reconcile`'s
@@ -110,32 +119,50 @@ Requires macOS 13+ and a Swift toolchain. `LSUIElement` — no Dock icon.
 
 ```bash
 /Applications/AutoRetryBar.app/Contents/MacOS/AutoRetryBar --dump
-```
-
-```bash
 /Applications/AutoRetryBar.app/Contents/MacOS/AutoRetryBar --login-item on|off
+/Applications/AutoRetryBar.app/Contents/MacOS/AutoRetryBar --auto-resume %1 on|off
+/Applications/AutoRetryBar.app/Contents/MacOS/AutoRetryBar --self-test
+/Applications/AutoRetryBar.app/Contents/MacOS/AutoRetryBar --render-icon out.png [scale]
 ```
 
-The first prints everything the menu would show and exits. There is no window, so without this an empty
-menu could equally mean "no sessions" or "the status directory moved". Run it from inside the
-`.app` — the login-item check reports `not found` for a bare binary, which is a bundle-context
-artefact rather than a real problem. The second is the Open at Login toggle without the menu
-— the interesting property of that switch is what happens on the *next* launch, which a
-GUI-only control cannot be checked for in a script.
+`--dump` prints everything the menu would show and exits. There is no window, so without this
+an empty menu could equally mean "no sessions" or "the status directory moved". Run it from
+inside the `.app` — the login-item check reports `not found` for a bare binary, which is a
+bundle-context artefact rather than a real problem. `--login-item` and `--auto-resume` are the
+two toggles without the menu: the interesting property of each is what happens *afterwards*,
+which a GUI-only control cannot be checked for in a script.
 
-## Two things worth knowing
+`--self-test` runs the app's built-in checks (shell timeouts, countdown text, the snapshot
+contract, parsing tmux's pane list with no locale) and exits non-zero on failure — the package
+has no XCTest target, so this is its test suite. `--render-icon` draws the menu bar mark to a PNG
+so a 16pt glyph can actually be looked at.
+
+## Things worth knowing
 
 - **PATH.** A GUI app inherits launchd's PATH, not your shell's, so Homebrew's `tmux` and an
   fnm/nvm-managed `node` are invisible to it. The status poll calls absolute paths; the menu
   *actions* run through `zsh -lc` so they resolve `claude-auto-retry` exactly as your terminal
   would. Actions are rare and user-initiated; the poll is neither.
-- **Automation permission.** "Attach in Terminal…" and "Tail Log…" drive Terminal.app via
-  AppleScript, so macOS asks once. Declining just means those two items do nothing.
+- **Locale.** A GUI app also inherits no `LANG`/`LC_*`, and a tmux client in that state
+  rewrites every tab and non-ASCII character in `-F` output to `_` (seen on tmux 3.7c) — which
+  made the pane list unparseable and the menu empty. The app runs tmux with `-u`, which forces
+  UTF-8 regardless of the environment.
+- **Nothing blocks the menu bar.** Status loads and repair actions run off the main thread,
+  and every child process has an enforced timeout. A hung `tmux` or a slow login shell shows
+  up as a slightly stale menu, not a frozen one. The app writes a heartbeat from the main
+  thread on every tick; the watchdog LaunchAgent restarts the app if it stops moving.
+- **One tmux server.** Sessions are listed from the default tmux server. Panes on a server
+  started with `tmux -L <name>` are not visible to the app (the monitors themselves handle
+  them fine).
 
 ## Icon
 
-Drawn in code (`Icon.swift`), not shipped as an asset. It is a radiating burst — the same
-visual family as Claude's mark, deliberately not the same drawing: a symmetric eight-spoke
-star with long axis spokes, short diagonals and an open centre, versus Claude's uneven fan of
-tapered spokes. Recognisable in a crowded menu bar without passing itself off as a
-first-party app.
+The mark is Claude's spark (`Resources/claude-logo.svg`, bundled by `build_app.sh`) with a small
+crescent moon in its lower-right corner. The moon is drawn in code (`Icon.swift`) over a knockout
+halo cut from the spark, so it stays legible at 16pt and carries through all three states —
+template (follows the menu bar's light/dark/highlighted tint), dimmed, and red for "needs you".
+It exists because the spark on its own is identical to Claude's own menu bar icon, which made
+the two impossible to tell apart at a glance. Run `--render-icon` to see it at any size.
+
+`claude-logo.svg` is Anthropic's artwork, used as-is; it is not covered by this repository's MIT
+license. To ship a mark of your own, replace that file — the moon badge is independent of it.

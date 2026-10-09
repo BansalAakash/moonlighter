@@ -54,13 +54,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// `full` adds the sessions that have no monitor at all — the ones switched off. That
     /// costs a reconcile --dry-run, so the 5-second bar refresh does without it and only the
     /// menu (which has to offer their toggle) pays for it.
+    ///
+    /// The load runs OFF the main thread. It shells out (tmux, pgrep, and for `full` a login
+    /// shell running node), and doing that inline meant any slow or hung child froze the whole
+    /// menu bar — including opening the menu. The heartbeat stays here, on the main thread, on
+    /// purpose: the watchdog treats it as proof the UI thread and timer are alive, which a
+    /// background load completing could not tell it.
+    private var loading = false
+    private var fullPending = false
+
     private func refresh(full: Bool = false) {
-        // Proof the refresh loop is actually alive, not just the process — a hung main
-        // thread or a Timer that stopped firing leaves the app running (so pgrep and
-        // launchd both see it as healthy) while the menu quietly goes stale forever. The
-        // watchdog LaunchAgent kills and relaunches the app if this file stops moving.
         Snapshot.writeHeartbeat()
-        sessions = full ? Snapshot.loadFull() : Snapshot.load()
+        // One load at a time. A request that arrives mid-load is remembered (a full one must not
+        // be dropped, or the menu would open without the switched-off sessions) and run after.
+        if loading { fullPending = fullPending || full; return }
+        loading = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let loaded = full ? Snapshot.loadFull() : Snapshot.load()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.loading = false
+                self.apply(loaded)
+                if self.fullPending { self.fullPending = false; self.refresh(full: true) }
+            }
+        }
+    }
+
+    private func apply(_ loaded: [Session]) {
+        sessions = loaded
         guard let button = statusItem?.button else { return }
 
         let (image, label) = Self.face(for: sessions)
@@ -157,7 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 3. The one real setting.
         add(menu, "Edit Shared Prompt…", #selector(openConfig),
             tooltip: "Sent when a session resumes, unless that session has its own "
-                   + "(~/.claude-auto-retry.json)")
+                   + "(~/.claude-auto-retry.json). Edits reach running sessions within a few seconds.")
 
         // Repair tools, revealed by holding Option. isAlternate swaps an item for the one
         // above it while the modifier is held, so the default menu stays four lines long.
@@ -245,8 +266,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Actions
 
     @objc private func restartAll() {
-        Controller.restartAllMonitors()
-        refresh()
+        // Kills the monitors, waits, and re-arms them through a login shell — seconds of work
+        // that must not run on the main thread.
+        DispatchQueue.global(qos: .userInitiated).async {
+            Controller.restartAllMonitors()
+            DispatchQueue.main.async { self.refresh() }
+        }
     }
 
     @objc private func toggleAutoResume(_ sender: NSMenuItem) {

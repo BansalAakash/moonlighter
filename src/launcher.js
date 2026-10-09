@@ -315,7 +315,7 @@ export async function retryTransientServerError(fn, {
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 } = {}) {
   for (let i = 1; ; i++) {
-    try { return fn(); }
+    try { return await fn(); }
     catch (err) {
       if (i >= attempts || !isTransientTmuxServerError(err)) throw err;
       await sleep(delayMs);

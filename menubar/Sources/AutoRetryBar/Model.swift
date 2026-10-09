@@ -157,9 +157,11 @@ struct Session {
             || lower.hasPrefix("claude-retry-")
     }
 
-    /// "3h12m" / "12m" / "48s" — a countdown short enough for the menu bar itself.
+    /// "3d4h" / "3h12m" / "12m" / "48s" — a countdown short enough for the menu bar itself.
+    /// Days appear once a wait passes two of them (a weekly limit), where "100h12m" is unreadable.
     static func short(_ date: Date) -> String {
         let s = max(0, Int(date.timeIntervalSinceNow))
+        if s >= 2 * 86400 { return "\(s / 86400)d\((s % 86400) / 3600)h" }
         if s >= 3600 { return "\(s / 3600)h\((s % 3600) / 60)m" }
         if s >= 60   { return "\(s / 60)m" }
         return "\(s)s"

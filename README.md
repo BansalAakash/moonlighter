@@ -21,6 +21,7 @@ instead of a paused prompt.
 | **Usage limit** — "resets 11:50am" | Reads the reset time, waits it out, then sends your continuation prompt. |
 | **Context limit** — window is full | Sends `/compact`, **waits for compaction to actually finish**, then sends your prompt. |
 | **API overload** — 529 / 500 / 503 | Retries with exponential backoff. |
+| **Weekly limit** — "resets Oct 12, 2am" | Reads the *date* as well as the time, so it waits days, not hours. |
 | **A monitor dies** | A repair timer notices within 5 minutes and re-arms it. |
 
 Everything runs on your machine. No account, no network calls, no dependencies.
@@ -44,9 +45,10 @@ cd moonlighter
 
 Then open a new terminal. That's the whole setup.
 
-The script links the CLI, adds a `claude` shell function to your `~/.zshrc` /
-`~/.bashrc`, and on macOS builds and launches the menu bar app. It's safe to re-run —
-do that after switching Node versions, which strands the shell wrapper.
+The script links the CLI, adds a `claude` shell function (to your `~/.zshrc` / `~/.bashrc`,
+or `~/.config/fish/functions/claude.fish` for fish), installs the 5-minute repair timer, and
+on macOS builds and launches the menu bar app. It's safe to re-run — do that after switching
+Node versions, which strands the shell wrapper.
 
 ## Using it
 
@@ -61,6 +63,16 @@ claude-auto-retry logs       # what has happened today
 ```
 
 To stop using it, `claude-auto-retry uninstall` removes the shell function.
+
+### Optional: event-driven overload detection
+
+By default, API-overload errors (529/500/503) are spotted by reading the terminal. For an exact,
+scrape-free trigger, install Claude Code's `StopFailure` hook (it edits
+`~/.claude/settings.json`, which is why the installer doesn't do it for you):
+
+```bash
+claude-auto-retry install-hook     # remove with: claude-auto-retry uninstall-hook
+```
 
 ## Leaving it running overnight
 
@@ -104,17 +116,19 @@ late rather than not at all.
 
 | What you see | Why | Fix |
 |---|---|---|
-| `status` lists no sessions | Claude wasn't launched through the wrapper — you were already inside tmux, or used `CLAUDE_AUTO_RETRY_NO_TMUX=1`, or started it from an IDE terminal | Launch with `claude` from a normal shell |
+| `status` lists no sessions | Claude wasn't launched through the wrapper — you ran `command claude`, set `CLAUDE_AUTO_RETRY_NO_TMUX=1` outside tmux, or an app started the `claude` binary directly | Launch with `claude` from a normal shell, or run `claude-auto-retry reconcile` to attach monitors to sessions already running in tmux |
+| A session shows "not being watched" | Its monitor stopped (killed, or the machine crashed) | `claude-auto-retry reconcile`; the repair timer also does this within 5 minutes |
 | Worked yesterday, not today | You switched Node versions. The shell wrapper and the repair timer both pin an absolute Node path | Re-run `./install.sh` |
 | One session is skipped, others work | Its auto-resume checkmark is off in the menu bar app | Click it back on |
 | Claude is stopped but never resumes | It's waiting on a **permission prompt**, not a limit. No retry message can clear that | Run unattended sessions in a mode that doesn't stop to ask |
 | Everything vanished | The Mac rebooted — a macOS update, or a crash. tmux sessions do not survive a reboot, and with FileVault on, nothing runs at all until someone logs in | Nothing to recover; the menu bar app returns at login |
-| Waiting for days, not hours | You hit a **weekly** cap rather than the 5-hour one | It will still wait it out |
+| Waiting for days, not hours | You hit a **weekly** cap rather than the 5-hour one | Expected — it waits for the date printed in the banner. `status` and the menu bar show the countdown in days |
+| Your config edits seem ignored | `~/.claude-auto-retry.json` isn't valid JSON (a stray quote in a prompt is enough). The previous settings stay in force and the log says why | `claude-auto-retry logs` — look for "is not valid JSON" |
 
 ## The menu bar app <sub>(macOS)</sub>
 
-A small icon in your status bar, so you never have to wonder whether the thing is
-working. It shows a countdown while a session is waiting out a limit, and turns red if
+A small icon in your status bar (Claude's spark with a little crescent moon, so it isn't
+mistaken for Claude's own), so you never have to wonder whether the thing is working. It shows a countdown while a session is waiting out a limit, and turns red if
 one needs you.
 
 With `sessionResetCheck.enabled` on (see below), the countdown doesn't disappear the rest
@@ -170,6 +184,10 @@ When a session resumes, it is sent one message. Set it in `~/.claude-auto-retry.
 Make this generic. It goes to *every* session on the machine, so build-specific
 instructions ("finish todo.md") will end up in an unrelated project.
 
+Edits take effect on running sessions within a few seconds — no restart. If the file stops
+being valid JSON, the monitors keep the last good settings and log a warning instead of
+quietly reverting to defaults.
+
 ### A prompt for one session only
 
 When two sessions are doing unrelated work, one shared instruction is wrong for at
@@ -197,6 +215,7 @@ process id, so they expire with the session and can never be sent to a later one
 | `retryMessage` | `"Continue…"` | Sent on **API overload** only, not usage limits |
 | `sessionResetCheck.enabled` | `false` | Passive `/status` check for the always-on menu bar countdown |
 | `sessionResetCheck.intervalMinutes` | `10` | How often an idle session gets checked |
+| `inputBox.whenOccupied` | `"send"` | What to do if the input box already holds text when a message is about to be typed. `"send"` types anyway (the text is appended to the draft, and a warning is logged); `"wait"` holds until the box is empty. Opt-in because Claude Code's greyed-out prompt *suggestions* look like typed text to a screen reader, and holding on one would stall an unattended session |
 
 All keys are optional and invalid values fall back to defaults.
 [`docs/reference.md`](docs/reference.md) documents the rest.
@@ -215,7 +234,15 @@ Sending keystrokes into your terminal is only safe if the detection is strict, s
 - Anything it isn't sure about, it leaves alone. Failure means *nothing happens* —
   never a stray keystroke.
 
-`npm test` runs 576 tests covering this.
+`npm test` pins each of these rules.
+
+## Names
+
+The project is **Moonlighter**. The command line tool, the shell function's launcher and the
+data directory (`~/.claude-auto-retry/`, `~/.claude-auto-retry.json`) keep the upstream name
+`claude-auto-retry`, and the menu bar app is `AutoRetryBar`. They were deliberately not renamed:
+the shell function, the launchd jobs and every running monitor refer to those paths, so a rename
+would strand existing installs.
 
 ## Credits
 

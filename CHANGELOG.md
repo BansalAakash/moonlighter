@@ -5,11 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-09-07
+## [Unreleased] - 2026-10-09
 
 Fork of upstream 0.7.3. Installed from source with `./install.sh`; not published to npm.
 
 ### Added
+- **Weekly limits wait for their date.** A banner such as `resets Oct 9, 10am` /
+  `Resets Sep 19 at 6:30am (Asia/Calcutta)` was not recognised at all (the reset patterns
+  required a digit straight after "resets"), so a weekly limit left the session sitting at the
+  prompt. The date is now detected, parsed (month, day, optional year, time, time zone) and
+  resolved to an instant — DST-correct, and independent of the host's time zone. The year is
+  inferred so that it fails *safe*: a date that has just passed means "the machine slept
+  through the reset" and retries now, never "next year"; only a date more than half a year off
+  is read as a year boundary. When one line carries both a 5-hour and a weekly clause, the
+  earlier one still wins, as it always did.
+- **`claude-auto-retry status` lists sessions.** One line per monitored session — the pane,
+  the claude PID, what it is doing and how long it has left (`3d4h left` for a weekly wait) —
+  before the log tail. Monitors now publish `pane` and `claudePid` in their status snapshot.
+  `status` is what the README said it was.
+- **fish support.** `install` writes `~/.config/fish/functions/claude.fish` (never over a
+  `claude.fish` that is not ours) and `uninstall` removes it. Previously `install` printed manual
+  instructions and exited non-zero, which aborted `install.sh` before the menu bar app was built.
+- **Live config reload.** Monitors re-read `~/.claude-auto-retry.json` when it changes, so
+  "Edit Shared Prompt…" reaches running sessions within seconds instead of only after a restart.
+- **`inputBox.whenOccupied`** (`"send"` default, or `"wait"`). Detects text already in the input
+  box before a message is typed. The default still sends (and now logs a warning that the
+  message landed on a draft); `"wait"` holds without consuming a retry. Opt-in because Claude
+  Code's greyed-out prompt suggestions are indistinguishable from typed text in a plain-text
+  capture.
+- **`install.sh` installs the repair timer** (step 3/4). Linux, and a Mac without Swift, had no
+  self-healing at all — only the menu bar app installed it.
+- **Menu bar app:** `--self-test` and `--render-icon` flags; weekly countdowns read in days
+  (`3d4h`).
 - **A separate `usageLimitMessage`.** The usage-limit retry no longer shares `retryMessage`
   with the overload path, so the hours-scale wake-up can carry a long autonomous-continuation
   instruction without also being typed at every transient 529.
@@ -37,7 +64,45 @@ Fork of upstream 0.7.3. Installed from source with `./install.sh`; not published
   Claude Code v2.1.263 pane capture, so the chrome rules are exercised against actual box
   rules, the footer, and the U+00A0 in the empty `❯ ` input row. 564 tests pass.
 
+### Changed
+- **The menu bar icon is no longer identical to Claude's own.** It is still the Claude spark, now
+  with a small crescent moon in the lower-right corner (a nod to "moonlighter"), drawn in code
+  over a knockout halo so it holds up at 16pt in the normal, dimmed and attention states.
+- `llms.txt` and the docs point at this fork's install (`./install.sh`), not `npm i -g
+  claude-auto-retry` (which installs upstream). `DESIGN-NOTES.md`, which lives upstream, is linked
+  there rather than referenced as a local file that does not exist.
+- A bad edit to `~/.claude-auto-retry.json` now keeps the last good settings and logs why,
+  instead of silently reverting every setting to its default.
+
 ### Fixed
+- **The menu bar app listed no sessions** on a machine with tmux 3.7. A GUI app inherits no
+  `LANG`, and a tmux client without a UTF-8 locale rewrites tabs and non-ASCII characters in
+  `-F` output to `_`, so the pane list never split into fields. tmux is now run with `-u`.
+  (`capture-pane`, which the monitors use, is unaffected.)
+- **`status` / `logs` read the wrong day's log** for the first hours of every local day east of
+  UTC (IST: 00:00–05:30): they derived the filename from the UTC date while the logger names
+  files by local date. Both now share one function.
+- **Concurrent `/status` probes.** After a restart every monitor ticks in lockstep, and the cache
+  claim was a read-then-write, so all of them launched their own scratch Claude — and each
+  one's orphan sweep killed its peers' live probes. The probe now takes an exclusive lock, the
+  sweep only kills sessions whose owner is dead or that are older than any real probe, and a
+  probe that read nothing no longer logs "Checked /status" as if it had.
+- **The menu bar app could freeze.** `Shell.run` read to EOF before checking its timeout, so the
+  timeout never applied to a hung child, and status loads and "Fix Monitoring" ran on the main
+  thread. Timeouts are enforced, stderr is no longer an undrained pipe, and loads run off-main
+  (the heartbeat the watchdog watches stays on the main thread).
+- The overload give-up warning was re-logged every minute while a stale error banner stayed on
+  screen; it is now announced once, like the safeguard and context-limit paths.
+- The StopFailure hook command is now shell-quoted (a checkout path with a space silently
+  disabled it); launcher paths and `$&`-style sequences in paths are substituted literally into
+  the generated wrapper, systemd unit and launchd plist; `retryTransientServerError` awaits its
+  callback.
+- Stale docs: the menu bar README described a hand-drawn icon and menu items that no longer
+  exist (including an Automation-permission note for two of them), the README's `status` and
+  "already inside tmux" troubleshooting rows described behaviour the code does not have, and
+  the test count was out of date.
+- A fixture contained a local username in a path.
+
 - **`loadConfig` now validates the no-config path too.** It returned the raw `DEFAULT_CONFIG`
   when the file was missing or unparseable, which was harmless only while every default was
   already its own final value. `contextLimit.retryMessage` defaults to `null`, meaning "reuse

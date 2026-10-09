@@ -9,6 +9,19 @@ import Foundation
 /// `claude-auto-retry` exactly the way the user's own terminal would — including whatever
 /// node their fnm/nvm setup selects. Actions are user-initiated and rare; the poll is not.
 enum Shell {
+    /// Output collected from the reader thread, behind a lock the waiting side shares.
+    private final class Collected: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+        func set(_ d: Data) { lock.lock(); data = d; lock.unlock() }
+        func get() -> Data { lock.lock(); defer { lock.unlock() }; return data }
+    }
+
+    /// Runs a command and returns its stdout and exit status. `timeout` is ENFORCED: a child
+    /// still running when it expires is terminated (then killed) and the call returns whatever
+    /// it had printed, with status -1. The previous version read to EOF BEFORE looking at the
+    /// clock, so the deadline only ever applied to a process that had already finished — a hung
+    /// child blocked the caller indefinitely, and on the main thread that froze the menu bar.
     @discardableResult
     static func run(_ launchPath: String, _ args: [String], timeout: TimeInterval = 10) -> (out: String, status: Int32) {
         let p = Process()
@@ -16,18 +29,40 @@ enum Shell {
         p.arguments = args
         let pipe = Pipe()
         p.standardOutput = pipe
-        p.standardError = Pipe()
+        // Never read, so it must never be a pipe: a child writing more than the pipe buffer to
+        // an undrained stderr blocks forever.
+        p.standardError = FileHandle.nullDevice
+
+        let exited = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in exited.signal() }
         do { try p.run() } catch { return ("", -1) }
 
-        // Read BEFORE waiting: a child that fills the 64KB pipe buffer blocks forever on write
-        // while the parent blocks in waitUntilExit — the classic deadlock. Reading to EOF is
-        // itself the join, so waitUntilExit afterwards returns immediately.
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let deadline = Date().addingTimeInterval(timeout)
-        while p.isRunning && Date() < deadline { usleep(20_000) }
-        if p.isRunning { p.terminate() }
-        p.waitUntilExit()
-        return (String(data: data, encoding: .utf8) ?? "", p.terminationStatus)
+        // Drain stdout on its own thread, concurrently with the wait: a child that fills the
+        // 64KB pipe would otherwise block on write while we block waiting for it to exit.
+        let collected = Collected()
+        let drained = DispatchSemaphore(value: 0)
+        let reader = pipe.fileHandleForReading
+        DispatchQueue.global(qos: .utility).async {
+            collected.set(reader.readDataToEndOfFile())
+            drained.signal()
+        }
+
+        var timedOut = false
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
+            timedOut = true
+            p.terminate()
+            if exited.wait(timeout: .now() + 2) == .timedOut {
+                kill(p.processIdentifier, SIGKILL)
+                _ = exited.wait(timeout: .now() + 1)
+            }
+        }
+        // EOF normally arrives with the exit. A grandchild that inherited the pipe can hold it
+        // open past that, so this wait is bounded too — we return what we have.
+        _ = drained.wait(timeout: .now() + 2)
+
+        let out = String(data: collected.get(), encoding: .utf8) ?? ""
+        let status: Int32 = (timedOut || p.isRunning) ? -1 : p.terminationStatus
+        return (out, status)
     }
 
     /// Run a command the way the user's terminal would (login shell, so rc files set PATH).
@@ -50,17 +85,18 @@ enum Tmux {
         Shell.firstExisting(["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"])
     }
 
-    /// pane id → session/socket, across every pane of the default server.
-    static func panes() -> [String: PaneInfo] {
-        guard let tmux = binary else { return [:] }
-        // pane_title LAST: Claude Code sets it to a description of what the session is about
-        // ("✳ Claude-auto-retry review"), which is the only identifier here that means anything
-        // to a person — session names are minted as claude-retry-<pid>-<timestamp>, and two
-        // sessions often share a working directory. It is free-form text, so it goes at the end
-        // where a stray separator cannot shift the other fields.
-        let (out, status) = Shell.run(tmux, ["list-panes", "-a", "-F",
-            "#{pane_id}\t#{session_name}\t#{socket_path}\t#{pane_current_path}\t#{pane_title}"])
-        guard status == 0 else { return [:] }   // no server running is exit 1, not a crash
+    /// `-u` is load-bearing. A GUI app inherits launchd's environment, which has no LANG/LC_*, and
+    /// a tmux client that does not believe it is in a UTF-8 locale rewrites every tab and every
+    /// non-ASCII character in `-F` output to "_" (observed on tmux 3.7c). The tab-separated
+    /// fields below then never split, `panes()` came back empty, and the menu bar listed no
+    /// sessions at all while the monitors were running fine. `-u` forces UTF-8 regardless of
+    /// the environment.
+    static let listPanesArguments = ["-u", "list-panes", "-a", "-F",
+        "#{pane_id}\t#{session_name}\t#{socket_path}\t#{pane_current_path}\t#{pane_title}"]
+
+    /// Parses `listPanesArguments` output. pane_title is LAST and may contain anything, tabs
+    /// included, so everything past the fourth separator belongs to it.
+    static func parsePanes(_ out: String) -> [String: PaneInfo] {
         var map: [String: PaneInfo] = [:]
         for line in out.split(separator: "\n") {
             let f = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
@@ -69,6 +105,19 @@ enum Tmux {
                                  title: f[4...].joined(separator: "\t"))
         }
         return map
+    }
+
+    /// pane id → session/socket, across every pane of the default server.
+    static func panes() -> [String: PaneInfo] {
+        guard let tmux = binary else { return [:] }
+        // pane_title LAST: Claude Code sets it to a description of what the session is about
+        // ("✳ Claude-auto-retry review"), which is the only identifier here that means anything
+        // to a person — session names are minted as claude-retry-<pid>-<timestamp>, and two
+        // sessions often share a working directory. It is free-form text, so it goes at the end
+        // where a stray separator cannot shift the other fields.
+        let (out, status) = Shell.run(tmux, listPanesArguments)
+        guard status == 0 else { return [:] }   // no server running is exit 1, not a crash
+        return parsePanes(out)
     }
 
     /// Every tmux pane running a Claude session, whether or not it is monitored — including

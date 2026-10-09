@@ -673,3 +673,22 @@ describe('session-reset check (disabled by default)', () => {
     assert.equal(s.sessionResetAt, 0);
   });
 });
+
+describe('weekly limit (dated reset)', () => {
+  // The banner names a date three days out. The monitor must wait for THAT instant, not for
+  // the next occurrence of the time of day.
+  it('waits days for a dated reset, not hours', async () => {
+    const target = new Date(Date.now() + 3 * 86400_000);
+    const month = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][target.getUTCMonth()];
+    const banner = `⎿ You've hit your weekly limit · resets ${month} ${target.getUTCDate()} at ${target.getUTCHours()}:00 (UTC)`
+      .replace(/at (\d):00/, 'at 0$1:00');
+    // 24h clock with minutes is unambiguous; the date is what this test pins.
+    const t = mockTmux(['● worked', '', banner, '', '╭────╮', '│ > │', '╰────╯'].join('\n'));
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    const hours = (s.waitUntil - Date.now()) / 3600_000;
+    assert.ok(hours > 60 && hours < 76, `expected ~72h, got ${hours.toFixed(1)}h`);
+    assert.equal(s._waitIsFallback, false, 'a parsed dated reset is a real reset time, not the fallback');
+    assert.equal(t._sent.length, 0);
+  });
+});

@@ -41,6 +41,29 @@ if let i = CommandLine.arguments.firstIndex(of: "--auto-resume") {
     exit(0)
 }
 
+// `AutoRetryBar --self-test` runs the app's built-in checks (shell timeouts, countdown text, the
+// snapshot contract) and exits non-zero on failure. Run it after any change to the shell or tmux plumbing.
+if CommandLine.arguments.contains("--self-test") {
+    exit(SelfTest.run())
+}
+
+// `AutoRetryBar --render-icon <out.png> [scale]` draws the menu bar mark to a PNG, then exits.
+// A 16pt glyph cannot be judged from code; this is how a change to it gets looked at.
+if let i = CommandLine.arguments.firstIndex(of: "--render-icon") {
+    let args = CommandLine.arguments
+    guard args.count > i + 1 else {
+        FileHandle.standardError.write(Data("usage: --render-icon <out.png> [scale]\n".utf8))
+        exit(2)
+    }
+    let scale = args.count > i + 2 ? Int(args[i + 2]) ?? 16 : 16
+    guard Icon.renderPNG(to: args[i + 1], scale: max(1, scale)) else {
+        FileHandle.standardError.write(Data("could not render the icon\n".utf8))
+        exit(1)
+    }
+    print("wrote \(args[i + 1])")
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--dump") {
     let sessions = Snapshot.loadFull()
     print("status dir : \(Snapshot.statusDir.path)")
