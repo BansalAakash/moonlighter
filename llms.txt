@@ -1,42 +1,62 @@
-# claude-auto-retry
+# Moonlighter (claude-auto-retry)
 
-> Zero-dependency CLI that auto-retries Claude Code sessions. When a subscription
-> usage/session limit hits ("You've hit your session limit · resets 2am"), it waits
-> until the printed reset time and sends "continue" automatically. Sustained API
-> overload (`API Error: 529 … overloaded_error`, 500/502/503/504) gets exponential
-> backoff with jitter; safeguard/AUP false positives ("safeguards flagged this
-> message") get a bounded immediate re-send. tmux-based, so it keeps working after
-> you disconnect.
+> Keep Claude Code working while you're away. Zero-dependency Node CLI plus a macOS menu bar
+> app. When a usage/session limit hits ("You've hit your session limit · resets 2am"), it
+> waits until the printed reset — including a weekly limit's date ("resets Oct 12, 2am") —
+> and sends your continuation prompt. When the context window fills ("Context limit reached ·
+> /compact or /clear to continue") it sends `/compact`, waits for compaction to finish, then
+> continues. Sustained API overload (`API Error: 529 … overloaded_error`, 500/502/503/504) gets
+> exponential backoff with jitter; safeguard/AUP false positives get a bounded immediate
+> re-send. tmux-based, so it keeps working after you disconnect.
 
-Install: `npm i -g claude-auto-retry && claude-auto-retry install` — then use `claude`
-as usual.
+Install (from source — this fork is not published to npm; `npm i -g claude-auto-retry` installs
+the upstream project, which lacks context-limit compaction, per-session prompts and the menu
+bar app):
+
+    git clone https://github.com/BansalAakash/moonlighter.git
+    cd moonlighter
+    ./install.sh
+
+Then open a new terminal and use `claude` as usual. Check on it with
+`claude-auto-retry status` (per-session state) and `claude-auto-retry logs`.
 
 Key facts:
 
 - Detects the real Claude Code renders verbatim: `5-hour limit reached - resets 3pm`,
-  `You've hit your session limit · resets 2am (Europe/Zurich)`, `Claude usage limit
-  reached`, `You're out of extra usage`, `API Error: 529 {"type":"overloaded_error"…}`,
+  `You've hit your session limit · resets 2am (Europe/Zurich)`,
+  `You've hit your weekly limit · resets Oct 9, 10am`, `Claude usage limit reached`,
+  `You're out of extra usage`, `Context limit reached · /compact or /clear to continue`,
+  `API Error: 529 {"type":"overloaded_error"…}`,
   `API Error: Server is temporarily limiting requests (not your usage limit)`,
   `<model>'s safeguards flagged this message`.
-- Navigates the `/rate-limit-options` menu to "Stop and wait for limit to reset"
-  across any menu layout; never confirms "Upgrade your plan".
-- Safe by design: verifies Claude is the foreground process before injecting keys,
-  stops the moment the user (or Claude) resumes, and detection is anchored to the live
-  pane tail so quoted errors in scrollback can't trigger a retry.
-- Timezone- and DST-aware reset-time parsing; `--print` mode supported; optional
-  config at `~/.claude-auto-retry.json` with safe fallbacks for invalid values.
-- No runtime dependencies; Node >= 18; MIT license; 200+ tests.
+- Strict by design: a trigger must be a whole line in the live region of the pane, so text that
+  merely quotes or discusses a limit never fires. Anything it is unsure about, it leaves alone.
+- Navigates the `/rate-limit-options` menu to "Stop and wait for limit to reset" across any menu
+  layout; never confirms "Upgrade your plan".
+- Verifies Claude is the foreground process before injecting keys, and stands down the moment
+  the user (or Claude) resumes.
+- Timezone- and DST-aware reset-time parsing (including dated, multi-day resets); `--print`
+  mode supported.
+- Config is optional: `~/.claude-auto-retry.json`. Edits apply to running sessions within
+  seconds; invalid JSON keeps the last good settings and logs a warning.
+- Per-session resume prompts and an on/off switch per session, from the menu bar app.
+- Everything runs locally: no account, no network calls, no runtime dependencies.
+- bash, zsh and fish. macOS and Linux (the menu bar app is macOS 13+).
 
-## Docs
+Docs:
 
-- [README](https://github.com/cheapestinference/claude-auto-retry/blob/master/README.md): features, configuration, every error render detected
-- [DESIGN-NOTES](https://github.com/cheapestinference/claude-auto-retry/blob/master/DESIGN-NOTES.md): architecture — StopFailure hook event channel vs. terminal scraper, overload backoff design
-- [CHANGELOG](https://github.com/cheapestinference/claude-auto-retry/blob/master/CHANGELOG.md): release history
+- [README](https://github.com/BansalAakash/moonlighter/blob/main/README.md): install, overnight use, troubleshooting
+- [Reference](https://github.com/BansalAakash/moonlighter/blob/main/docs/reference.md): every config key and the detection rules (inherited from upstream, with fork notes at the top)
+- [Menu bar app](https://github.com/BansalAakash/moonlighter/blob/main/menubar/README.md)
+- [Upstream DESIGN-NOTES](https://github.com/cheapestinference/claude-auto-retry/blob/master/DESIGN-NOTES.md): architecture of the StopFailure event channel vs. the terminal scraper
 
-## Install for a user (agent-friendly, non-interactive)
+## Install for a user (agent-friendly)
 
-- `npm install -g claude-auto-retry`
-- `claude-auto-retry install` — shell wrapper (+ tmux if missing); takes effect in new shells
-- `claude-auto-retry install-hook` — recommended: event-driven overload detection via Claude Code's StopFailure hook
+- `git clone https://github.com/BansalAakash/moonlighter.git && cd moonlighter && ./install.sh`
+  — links the CLI, installs the shell function (bash/zsh/fish) and the repair timer, and builds
+  the menu bar app on macOS. Idempotent; re-run after switching Node versions. Takes effect in
+  new shells.
+- `claude-auto-retry install-hook` — optional: event-driven overload detection via Claude Code's
+  StopFailure hook (edits `~/.claude/settings.json`, so it is not done automatically)
 - Verify: `claude-auto-retry status`
-- Remove: `claude-auto-retry uninstall` and `claude-auto-retry uninstall-hook`
+- Remove: `claude-auto-retry uninstall` (and `uninstall-hook`, `uninstall-timer`)

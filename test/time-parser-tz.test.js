@@ -116,3 +116,16 @@ describe('calculateWaitMs is host-timezone independent (date-anchored correction
     }
   });
 });
+
+// Dated (weekly) resets must also be right whatever the HOST timezone is — the banner's own
+// timezone, not the machine's, decides the instant.
+describe('calculateWaitMs dated resets are host-timezone independent', () => {
+  // Fri 2026-10-09 12:00Z → "resets Oct 12 at 2am (Asia/Calcutta)" = Oct 11 20:30Z = 56.5h.
+  const BANNER = 'resets Oct 12 at 2am (Asia/Calcutta)';
+  const NOW = '2026-10-09T12:00:00Z';
+  for (const host of ['UTC', 'Asia/Calcutta', 'Pacific/Auckland', 'America/Los_Angeles']) {
+    it(`host ${host}`, () => {
+      assert.ok(Math.abs(waitHoursIn(host, BANNER, NOW) - (56.5 + 1 / 60)) < 0.01);
+    });
+  }
+});

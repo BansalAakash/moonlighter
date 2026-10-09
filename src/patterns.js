@@ -1,3 +1,5 @@
+import { DATED_RESET_REGEX } from './time-parser.js';
+
 // Full CSI sequence range per ECMA-48: parameter/intermediate bytes (0x20-0x3f) + final byte (0x40-0x7e)
 // Covers standard, private-mode (\x1b[?25h), and extended sequences
 const CSI_REGEX = /\x1b\[[\x20-\x3f]*[\x40-\x7e]/g;
@@ -189,6 +191,9 @@ const RESET_PATTERNS = [
   /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?/i,   // "resets 3pm" / "resets at 3:00 PM"
   /resets?\s+in[:\s]\s*\d/i,                                   // "resets in: 3 hours"
   /try again in \d+\s*(?:hours?|minutes?|h|m)/i,               // "try again in 5 hours"
+  // A reset that names its calendar date — "resets Oct 9, 10am", the WEEKLY-limit shape.
+  // Built from time-parser's own regex so what is detected is exactly what can be parsed.
+  DATED_RESET_REGEX,
 ];
 
 // --- Renders vs prose (#73) ---
@@ -813,6 +818,42 @@ export function isInputBoxEmpty(text) {
     if (OCCUPIED_PROMPT_ROW.test(lines[i])) return false;
   }
   return false;
+}
+
+// The text sitting in the input box, or null when the box is empty (or cannot be read).
+//
+// Used to know whether typing a message would land on top of a half-written draft. It is
+// deliberately POSITIVE-ONLY: null means "no draft that I can positively identify", never "the
+// layout is unrecognised, refuse" — the caller treats null as clear to proceed, so an unfamiliar
+// render can only ever cost a missed warning, never a stalled session.
+//
+// Two layouts exist. Current Claude Code prints the prompt row flush (`❯ draft`), which is not
+// chrome, so it is the first content row above the footer. The older boxed layout
+// (`│ > draft │`) IS matched by the chrome allowlist whatever it contains, so the walk up from
+// the bottom has to inspect chrome rows too — and stops at the first real content row.
+// Caveat, inherent to a plain-text capture: Claude Code's greyed-out prompt SUGGESTION looks
+// exactly like typed text here, so callers must not make a draft a hard stop by default.
+// The body must start with something that is neither whitespace nor the box's own closing
+// border, or an EMPTY boxed row ("│ >          │") would read its right-hand │ as the draft.
+const DRAFT_PROMPT_ROW = /^\s*(?:│\s*)?[❯>]\s+([^\s│].*?)\s*(?:│\s*)?$/;
+// A flush prompt row is only the INPUT row when it sits directly under the box's top rule. An
+// echo of something the user submitted earlier ("❯ /compact") renders the same way but sits in
+// the transcript, and with only blank lines between it and an empty box it would otherwise be
+// mistaken for a draft.
+const BOX_TOP = /^\s*[─━╭]/;
+export function inputBoxDraft(text) {
+  const all = stripAnsi(text).split('\n');
+  for (let i = all.length - 1; i >= 0; i--) {
+    const line = all[i];
+    const m = DRAFT_PROMPT_ROW.exec(line);
+    if (m && !PLACEHOLDER_HINT_ROW.test(line)) {
+      const boxed = /^\s*│/.test(line);                       // the older bordered layout carries its own box
+      if (boxed || (i > 0 && BOX_TOP.test(all[i - 1]))) return m[1].trim();
+      return null;                                            // a transcript echo, not the input row
+    }
+    if (!isChromeLine(line)) return null;     // first real content row, and it is not a prompt row
+  }
+  return null;
 }
 
 // Reads a row shape (RESET_ROW or USAGE_PERCENT_ROW) out of one block of the Usage tab —

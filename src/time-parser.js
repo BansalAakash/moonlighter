@@ -1,9 +1,48 @@
 const RESET_TIME_REGEX = /resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?/i;
+
+// A reset that names a calendar date: "resets Oct 9, 10am", "Resets Sep 19 at 6:30am
+// (Asia/Calcutta)". This is the shape of a WEEKLY limit — the reset is days away, so a bare
+// time-of-day parse ("10am") would wake the monitor at the next 10am, up to six days early,
+// and burn every retry against a limit that is still live. The clause (month, day, optional
+// year, optional time, optional timezone) is consumed whole so the line-shape checks in
+// patterns.js see a clean tail. patterns.js builds its RESET_PATTERNS entry from this same
+// source, so detection and parsing cannot drift apart.
+const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const MONTH_ALT = '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+export const DATED_RESET_REGEX = new RegExp(
+  `resets?\\s+(?:on\\s+)?${MONTH_ALT}\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`
+  + '(?:,?\\s+(\\d{4})\\b)?'
+  + '(?:,?\\s*(?:at\\s+)?(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?\\s*(?:\\(([^)]+)\\))?)?', 'i');
 const RELATIVE_TIME_REGEX = /(?:try again|wait|resets?\s+in)[:\s]\s*(?:for\s+)?(?:in\s+)?(\d+)\s*(hours?|minutes?|mins?|h|m)\b/i;
 
 export function parseResetTime(text) {
-  // Try absolute time first: "resets at 3pm (UTC)"
+  // A dated reset ("resets Oct 9, 10am") is read as a date, never as a bare time of day.
+  // On a line carrying BOTH shapes ("5-hour limit resets 3pm, weekly limit resets Oct 12,
+  // 9am") the EARLIER clause wins, as it always has: the sooner reset is the one the monitor
+  // can act on, and if a longer limit is still live when it wakes, that banner re-enters the
+  // wait. Under-waiting self-corrects; reading the later clause could park a session for days
+  // on a limit that was only being mentioned.
+  const dated = text.match(DATED_RESET_REGEX);
   const absMatch = text.match(RESET_TIME_REGEX);
+  if (dated && (!absMatch || dated.index <= absMatch.index)) {
+    const month = MONTH_NAMES.indexOf(dated[1].slice(0, 3).toLowerCase()) + 1;
+    const day = parseInt(dated[2], 10);
+    const year = dated[3] ? parseInt(dated[3], 10) : null;
+    // A date with no time of day cannot be turned into an instant; null lands on the
+    // fallback wait rather than guessing midnight.
+    if (dated[4] === undefined) return null;
+    let hour = parseInt(dated[4], 10);
+    const minute = dated[5] ? parseInt(dated[5], 10) : 0;
+    const ampm = dated[6]?.toLowerCase() || null;
+    if (ampm === 'pm' && hour !== 12) hour += 12;
+    if (ampm === 'am' && hour === 12) hour = 0;
+    if (day < 1 || day > 31 || hour > 23 || hour < 0 || minute > 59) return null;
+    // No am/pm on a dated reset is read as a 24h clock: nothing in the dated renders is
+    // ambiguous the way a bare "resets 3" is, and guessing noon/midnight would be worse.
+    return { hour, minute, timezone: dated[7] || null, ambiguous: false, month, day, year };
+  }
+
+  // Try absolute time first: "resets at 3pm (UTC)"
   if (absMatch) {
     let hour = parseInt(absMatch[1], 10);
     const minute = absMatch[2] ? parseInt(absMatch[2], 10) : 0;
@@ -71,25 +110,14 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
   // the given hour:minute in the target timezone, on today's date there (dayOffset 0) or
   // a following day (dayOffset 1 = the roll-to-tomorrow path — anchored to the actual
   // calendar day so a 23h/25h DST day converges to the right instant).
-  function getTargetTimestamp(h, m, dayOffset = 0) {
-    // Get today's date in the target timezone
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-      hour12: false,
-    }).formatToParts(now);
-
-    let y = parseInt(parts.find(p => p.type === 'year').value);
-    let mo = parseInt(parts.find(p => p.type === 'month').value) - 1;
-    let d = parseInt(parts.find(p => p.type === 'day').value);
-    if (dayOffset) {
-      // Normalize month/year rollover through Date.UTC (calendar-day arithmetic only).
-      const norm = new Date(Date.UTC(y, mo, d + dayOffset));
-      y = norm.getUTCFullYear(); mo = norm.getUTCMonth(); d = norm.getUTCDate();
-    }
-
+  // Resolve a wall-clock time on an explicit calendar date in `tz` to a UTC instant.
+  // `mo` is zero-based; day overflow normalises through Date.UTC (calendar arithmetic only).
+  function resolveWall(y, mo, d, h, m) {
     // Construct target date string and parse in HOST-local time as the initial guess
     // (a UTC anchor put the guess up to a full offset away; host-local is usually close).
-    const targetStr = `${y}-${String(mo + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
+    const norm = new Date(Date.UTC(y, mo, d));
+    y = norm.getUTCFullYear(); mo = norm.getUTCMonth(); d = norm.getUTCDate();
+    const targetStr = `${String(y).padStart(4, '0')}-${String(mo + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
     const guess = new Date(targetStr);
 
     // Iterative correction: render the guess in the target TZ and move by the FULL
@@ -137,6 +165,49 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     }
 
     return candidate;
+  }
+
+  // Today's calendar date in `tz` (year, zero-based month, day).
+  function todayInTz() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour12: false,
+    }).formatToParts(now);
+    return {
+      y: parseInt(parts.find(p => p.type === 'year').value),
+      mo: parseInt(parts.find(p => p.type === 'month').value) - 1,
+      d: parseInt(parts.find(p => p.type === 'day').value),
+    };
+  }
+
+  // DST-safe approach: the correct UTC timestamp for the given hour:minute in the target
+  // timezone, on today's date there (dayOffset 0) or a following day (dayOffset 1 = the
+  // roll-to-tomorrow path — anchored to the actual calendar day so a 23h/25h DST day
+  // converges to the right instant).
+  function getTargetTimestamp(h, m, dayOffset = 0) {
+    const t = todayInTz();
+    return resolveWall(t.y, t.mo, t.d + dayOffset, h, m);
+  }
+
+  // A reset that names its calendar date (a weekly limit: "resets Oct 9, 10am"). The year is
+  // normally absent, so it is inferred — and the inference has to fail SAFE. A date that has
+  // just passed is overwhelmingly a monitor that woke late (machine asleep through the reset),
+  // not "next year", so a past date costs only the margin: retry now. Only a date more than
+  // half a year off is read as a year boundary (a December banner naming a January reset, or
+  // the mirror image: a stale December banner seen in January), because the wrong guess in
+  // the over-waiting direction would park the session for a year.
+  if (parsed.month) {
+    const HALF_YEAR_MS = 183 * 24 * 3600_000;
+    const y0 = parsed.year ?? todayInTz().y;
+    let diff = resolveWall(y0, parsed.month - 1, parsed.day, parsed.hour, parsed.minute) - now.getTime();
+    if (parsed.year == null) {
+      if (diff < -HALF_YEAR_MS) {
+        diff = resolveWall(y0 + 1, parsed.month - 1, parsed.day, parsed.hour, parsed.minute) - now.getTime();
+      } else if (diff > HALF_YEAR_MS) {
+        diff = resolveWall(y0 - 1, parsed.month - 1, parsed.day, parsed.hour, parsed.minute) - now.getTime();
+      }
+    }
+    return Math.max(0, diff) + marginSeconds * 1000;
   }
 
   if (parsed.ambiguous) {

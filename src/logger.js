@@ -2,7 +2,7 @@ import { appendFile, mkdir, readdir, unlink, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-const DEFAULT_LOG_DIR = join(homedir(), '.claude-auto-retry', 'logs');
+export const DEFAULT_LOG_DIR = join(homedir(), '.claude-auto-retry', 'logs');
 const MAX_AGE_DAYS = 7;
 const CLEANUP_INTERVAL_MS = 3600_000;
 let lastCleanup = 0;
@@ -32,9 +32,17 @@ export function localTimestamp(date = new Date()) {
   return `${y}-${mo}-${day} ${h}:${mi}:${s}`;
 }
 
-function todayFile(dir) {
-  const { y, mo, day } = localParts(new Date());
+// The log file for a given moment — named by LOCAL calendar date, rolling over at local
+// midnight. Exported so `claude-auto-retry status`/`logs` read the file the monitors are
+// actually appending to; deriving the name separately (toISOString() is UTC) pointed them at
+// yesterday's file for the first hours of every local day east of Greenwich.
+export function todayLogFile(dir = DEFAULT_LOG_DIR, date = new Date()) {
+  const { y, mo, day } = localParts(date);
   return join(dir, `${y}-${mo}-${day}.log`);
+}
+
+function todayFile(dir) {
+  return todayLogFile(dir);
 }
 
 async function cleanup(dir) {

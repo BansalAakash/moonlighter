@@ -1133,3 +1133,38 @@ describe('findSessionResetLine', () => {
     assert.equal(findWeeklyUsagePercent(noPanel), null);
   });
 });
+
+// --- Weekly limits render a dated reset ("resets Oct 9, 10am") ---
+// The reset patterns used to require a digit straight after "resets", so the weekly banner
+// documented in docs/reference.md was not detected at all: the session sat at the prompt.
+describe('dated (weekly) reset banners', () => {
+  const pane = (...banner) => ['', '● did some work', '', ...banner, '', '╭────╮', '│ > │', '╰────╯', '  ? for shortcuts'].join('\n');
+
+  it("detects the one-line weekly banner", () => {
+    assert.equal(isRateLimited(pane("⎿ You've hit your weekly limit · resets Oct 9, 10am"), [], 12), true);
+  });
+  it('detects it with a time zone and an "at"', () => {
+    assert.equal(isRateLimited(pane("⎿ You've hit your weekly limit · resets Oct 12 at 2am (Asia/Calcutta)"), [], 12), true);
+  });
+  it('detects the two-line render (limit line, then a reset line carrying the date)', () => {
+    assert.equal(isRateLimited(pane("⚠ You've hit your weekly limit", '· resets Oct 12, 2am (UTC)'), [], 12), true);
+  });
+  it('findRateLimitMessage returns the dated line so it can be parsed', () => {
+    const msg = findRateLimitMessage(pane("⎿ You've hit your weekly limit · resets Oct 12 at 2am (UTC)"), [], 12);
+    assert.match(msg, /resets Oct 12 at 2am/);
+  });
+  it('a dated reset below a stale 5-hour banner is the one returned', () => {
+    const text = [
+      "⎿ You've hit your session limit · resets 11:30am (UTC)", '● worked a while', '',
+      "⎿ You've hit your weekly limit · resets Oct 12, 2am (UTC)", '', '╭────╮', '│ > │', '╰────╯',
+    ].join('\n');
+    assert.match(findRateLimitMessage(text, [], 12), /Oct 12/);
+  });
+  it('prose about a month and a date is not a limit', () => {
+    assert.equal(isRateLimited(pane('● The billing cycle resets Oct 9 for everyone.'), [], 12), false);
+  });
+  it('a quoted dated banner in a tool call is still masked as tool echo', () => {
+    const text = ['● Bash(grep -r "weekly limit" docs/)', "  ⎿ You've hit your weekly limit · resets Oct 9, 10am", '', '╭────╮', '│ > │', '╰────╯'].join('\n');
+    assert.equal(isRateLimited(text, [], 12), false);
+  });
+});

@@ -16,7 +16,7 @@
 // the file's checkedAt lets concurrent monitors avoid piling on redundant scratch
 // sessions (each one claims the slot by writing a fresh checkedAt before it starts).
 
-import { readFile, writeFile, appendFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, appendFile, mkdir, stat, unlink } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
@@ -81,10 +81,27 @@ const SCRATCH_SESSION_PREFIX = 'car-usage-probe-';
 // reaching probeViaScratchSession's `finally`, orphaning the scratch tmux session and its
 // `claude` process. Swept here — right before creating a new one — rather than at shutdown
 // time, so it self-heals no matter WHY a previous probe never finished, not just SIGTERM.
+//
+// "Orphaned" has to be decided, not assumed: every monitor on the machine shares this
+// namespace, so sweeping everything with the prefix also killed a PEER's probe that was
+// still running (the name is `<prefix><pid>-<startedAt>`). A session counts as live only if
+// its owner process still exists AND it is younger than any real probe could be.
+const PROBE_MAX_AGE_MS = 120_000;
+
+export function isLiveProbeSession(name, now = Date.now()) {
+  const m = name.match(/^car-usage-probe-(\d+)-(\d+)$/);
+  if (!m) return false;                                   // unrecognised shape → treat as orphaned
+  if (now - Number(m[2]) > PROBE_MAX_AGE_MS) return false;
+  try { process.kill(Number(m[1]), 0); return true; }
+  catch (err) { return err.code === 'EPERM'; }            // exists but not ours → still alive
+}
+
 async function sweepOrphanedSessions(tmuxAdapter) {
   const names = await tmuxAdapter.listSessions();
   for (const n of names) {
-    if (n.startsWith(SCRATCH_SESSION_PREFIX)) await tmuxAdapter.killSession(n).catch(() => {});
+    if (n.startsWith(SCRATCH_SESSION_PREFIX) && !isLiveProbeSession(n)) {
+      await tmuxAdapter.killSession(n).catch(() => {});
+    }
   }
 }
 
@@ -148,36 +165,77 @@ function pickCacheFields(source) {
   };
 }
 
+// Cross-process mutual exclusion for the probe. The cache's claimedAt is advisory — a
+// read-then-write that N monitors ticking in the same instant all pass together (after a
+// "Fix Monitoring" restart they tick in lockstep), so every one of them launched its own
+// scratch Claude. Creating the lock file with O_EXCL is atomic: exactly one process wins.
+// A lock older than LOCK_STALE_MS belongs to a probe that died without releasing it.
+const LOCK_STALE_MS = 60_000;
+
+async function acquireProbeLock(lockFile) {
+  await mkdir(dirname(lockFile), { recursive: true });
+  const token = `${process.pid}-${Date.now()}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await writeFile(lockFile, token, { flag: 'wx' });
+      // Release only a lock that is still OURS: after a stale steal, the original owner's
+      // late release must not delete the new owner's lock.
+      return async () => {
+        try { if ((await readFile(lockFile, 'utf-8')) === token) await unlink(lockFile); } catch { /* gone */ }
+      };
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      let ageMs;
+      try { ageMs = Date.now() - (await stat(lockFile)).mtimeMs; } catch { continue; }  // vanished → retry
+      if (ageMs < LOCK_STALE_MS) return null;                                           // a live probe owns it
+      await unlink(lockFile).catch(() => {});                                           // abandoned → take over
+    }
+  }
+  return null;
+}
+
 // Called from an idle monitoring tick. Returns { resetAt, percentUsed, weeklyPercentUsed,
-// weeklyResetText, fresh } — fresh is true only when a probe actually ran THIS call (as
-// opposed to serving a cache hit or deferring to another monitor's in-flight claim), so
-// callers can tell "just learned something new" apart from "nothing changed, don't bother
-// logging it".
+// weeklyResetText, fresh } — fresh is true only when a probe actually produced a reading THIS
+// call (as opposed to serving a cache hit, deferring to another monitor's in-flight probe, or
+// a probe that failed outright), so callers can tell "just learned something new" apart from
+// "nothing changed, don't bother logging it".
 export async function getSessionUsage(tmuxAdapter, config, cacheFile = DEFAULT_CACHE_FILE) {
   const intervalMs = ((config.sessionResetCheck && config.sessionResetCheck.intervalMinutes) || 10) * 60_000;
+  const served = (cache) => ({ ...pickCacheFields(cache), fresh: false });
   const now = Date.now();
   const cache = await readCache(cacheFile);
   if (cache) {
-    if (cache.checkedAt && now - cache.checkedAt < intervalMs) return { ...pickCacheFields(cache), fresh: false };
-    if (cache.claimedAt && now - cache.claimedAt < CLAIM_ABANDON_MS) return { ...pickCacheFields(cache), fresh: false };
+    if (cache.checkedAt && now - cache.checkedAt < intervalMs) return served(cache);
+    if (cache.claimedAt && now - cache.claimedAt < CLAIM_ABANDON_MS) return served(cache);
   }
-  const prior = pickCacheFields(cache);
-  const priorCheckedAt = cache ? cache.checkedAt || 0 : 0;
-  // Claim the slot up front (before the several-second probe), so a second monitor's tick
-  // landing moments later sees a fresh claimedAt and skips its own redundant scratch session.
-  await writeCache(cacheFile, { ...prior, checkedAt: priorCheckedAt, claimedAt: now });
-  const result = await probeViaScratchSession(tmuxAdapter, config).catch(() => null);
-  const final = {
-    resetAt: (result && result.resetAt) || prior.resetAt,
-    // A totally failed probe falls back to the last known figures (better than nothing,
-    // same as resetAt); a probe that succeeded but couldn't read a given row reports that
-    // one as unknown rather than silently reusing a figure that's since drifted.
-    percentUsed: result ? result.percentUsed : prior.percentUsed,
-    weeklyPercentUsed: result ? result.weeklyPercentUsed : prior.weeklyPercentUsed,
-    weeklyResetText: result ? result.weeklyResetText : prior.weeklyResetText,
-  };
-  await writeCache(cacheFile, { ...final, checkedAt: Date.now(), claimedAt: now });
-  return { ...final, fresh: true };
+
+  const release = await acquireProbeLock(`${cacheFile}.lock`).catch(() => null);
+  if (!release) return served(cache);                       // another monitor is probing right now
+  try {
+    // Re-check under the lock: a peer may have finished a probe in the gap between our first
+    // read and winning the lock, in which case there is nothing left to do.
+    const current = await readCache(cacheFile);
+    if (current && current.checkedAt && Date.now() - current.checkedAt < intervalMs) return served(current);
+
+    const prior = pickCacheFields(current);
+    const priorCheckedAt = current ? current.checkedAt || 0 : 0;
+    const claimedAt = Date.now();
+    await writeCache(cacheFile, { ...prior, checkedAt: priorCheckedAt, claimedAt });
+    const result = await probeViaScratchSession(tmuxAdapter, config).catch(() => null);
+    const final = {
+      resetAt: (result && result.resetAt) || prior.resetAt,
+      // A totally failed probe falls back to the last known figures (better than nothing,
+      // same as resetAt); a probe that succeeded but couldn't read a given row reports that
+      // one as unknown rather than silently reusing a figure that's since drifted.
+      percentUsed: result ? result.percentUsed : prior.percentUsed,
+      weeklyPercentUsed: result ? result.weeklyPercentUsed : prior.weeklyPercentUsed,
+      weeklyResetText: result ? result.weeklyResetText : prior.weeklyResetText,
+    };
+    await writeCache(cacheFile, { ...final, checkedAt: Date.now(), claimedAt });
+    return { ...final, fresh: result !== null };
+  } finally {
+    await release();
+  }
 }
 
 // A real usage-limit episode just resolved, so the window that produced the cached

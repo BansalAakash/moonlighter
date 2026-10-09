@@ -193,3 +193,90 @@ describe('calculateWaitMs', () => {
     assert.ok(hours > 21 && hours < 23, `expected ~22h (tomorrow), got ${hours.toFixed(2)}h`);
   });
 });
+
+// --- Weekly limits: a reset that names its calendar date ("resets Oct 9, 10am") ---
+// Previously unrecognised: parseResetTime returned null (or, for a bare clock, read only the
+// time of day), so a limit days away was treated as a same-day reset.
+describe('parseResetTime — dated (weekly) resets', () => {
+  it('parses "resets Oct 9, 10am"', () => {
+    const r = parseResetTime("You've hit your weekly limit · resets Oct 9, 10am");
+    assert.deepEqual([r.month, r.day, r.hour, r.minute, r.year], [10, 9, 10, 0, null]);
+    assert.equal(r.timezone, null);
+  });
+  it('parses "Resets Sep 19 at 6:30am (Asia/Calcutta)"', () => {
+    const r = parseResetTime('Resets Sep 19 at 6:30am (Asia/Calcutta)');
+    assert.deepEqual([r.month, r.day, r.hour, r.minute], [9, 19, 6, 30]);
+    assert.equal(r.timezone, 'Asia/Calcutta');
+  });
+  it('accepts full month names, ordinals and an explicit year', () => {
+    const r = parseResetTime('resets on December 3rd, 2026 at 2:30pm (UTC)');
+    assert.deepEqual([r.month, r.day, r.year, r.hour, r.minute], [12, 3, 2026, 14, 30]);
+  });
+  it('does not mistake the year for the hour', () => {
+    const r = parseResetTime('resets Oct 12 2026 at 9am (UTC)');
+    assert.deepEqual([r.year, r.hour], [2026, 9]);
+  });
+  it('handles 12am / 12pm on a dated reset', () => {
+    assert.equal(parseResetTime('resets Oct 9, 12am (UTC)').hour, 0);
+    assert.equal(parseResetTime('resets Oct 9, 12pm (UTC)').hour, 12);
+  });
+  it('returns null for a date with no time of day (falls back instead of guessing midnight)', () => {
+    assert.equal(parseResetTime('weekly limit resets Oct 9'), null);
+  });
+  it('returns null for an impossible day', () => {
+    assert.equal(parseResetTime('resets Oct 40, 10am'), null);
+  });
+  it('does not treat a plain clock reset as dated', () => {
+    assert.equal(parseResetTime('resets 3pm (UTC)').month, undefined);
+  });
+  it('on a line with both shapes, the EARLIER clause wins (never over-wait on a mentioned limit)', () => {
+    const both = parseResetTime('5-hour limit resets 3pm (UTC), weekly limit resets Oct 12, 9am (UTC)');
+    assert.equal(both.hour, 15);
+    assert.equal(both.month, undefined);
+    const reversed = parseResetTime('weekly limit resets Oct 12, 9am (UTC), 5-hour limit resets 3pm (UTC)');
+    assert.equal(reversed.month, 10);
+  });
+});
+
+describe('calculateWaitMs — dated (weekly) resets', () => {
+  const H = 3600_000;
+  const wait = (banner, nowIso) => calculateWaitMs(parseResetTime(banner), 60, 5, new Date(nowIso)) / H;
+
+  it('waits days, not hours, for a reset on a later date', () => {
+    // Fri 2026-10-09 12:00Z → Mon 2026-10-12 02:00Z = 62h, + 60s margin
+    const h = wait('resets Oct 12 at 2am (UTC)', '2026-10-09T12:00:00Z');
+    assert.ok(Math.abs(h - (62 + 1 / 60)) < 0.001, `got ${h}`);
+  });
+  it('honours the banner timezone, not the host timezone', () => {
+    // 2am Calcutta (UTC+5:30) on Oct 12 = Oct 11 20:30Z → 56.5h after Oct 9 12:00Z
+    const h = wait('resets Oct 12 at 2am (Asia/Calcutta)', '2026-10-09T12:00:00Z');
+    assert.ok(Math.abs(h - (56.5 + 1 / 60)) < 0.001, `got ${h}`);
+  });
+  it('retries promptly when the date has only just passed (machine slept through the reset)', () => {
+    const h = wait('resets Oct 9, 10am (UTC)', '2026-10-09T13:00:00Z');
+    assert.ok(h < 0.02, `expected ~margin only, got ${h}h`);
+  });
+  it('does NOT roll a recently-passed date to next year', () => {
+    // Three days late. Rolling to next year would park the session for ~362 days.
+    const h = wait('resets Oct 9, 10am (UTC)', '2026-10-12T10:00:00Z');
+    assert.ok(h < 0.02, `expected ~margin only, got ${h}h`);
+  });
+  it('reads a January date seen in late December as next year', () => {
+    // 2026-12-30 12:00Z → 2027-01-02 09:00Z = 69h
+    const h = wait('resets Jan 2 at 9am (UTC)', '2026-12-30T12:00:00Z');
+    assert.ok(Math.abs(h - (69 + 1 / 60)) < 0.001, `got ${h}`);
+  });
+  it('reads a stale December date seen in early January as already past, not next December', () => {
+    const h = wait('resets Dec 30 at 9am (UTC)', '2027-01-03T12:00:00Z');
+    assert.ok(h < 0.02, `expected ~margin only, got ${h}h`);
+  });
+  it('an explicit year is used as given', () => {
+    const h = wait('resets Oct 12 2026 at 2am (UTC)', '2026-10-09T12:00:00Z');
+    assert.ok(Math.abs(h - (62 + 1 / 60)) < 0.001, `got ${h}`);
+  });
+  it('is DST-correct across a US fall-back between now and the reset', () => {
+    // 2026-10-30 09:00 EDT (13:00Z) → Mon 2026-11-02 09:00 EST (14:00Z): 73h, since Nov 1 has 25h.
+    const h = wait('resets Nov 2 at 9am (America/New_York)', '2026-10-30T13:00:00Z');
+    assert.ok(Math.abs(h - (73 + 1 / 60)) < 0.001, `got ${h}`);
+  });
+});

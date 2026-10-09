@@ -1,11 +1,11 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile, readFile, unlink } from 'node:fs/promises';
+import { writeFile, readFile, unlink, mkdtemp, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
-import { injectWrapper, removeWrapper, MARKER_START, MARKER_END, renderReconcileUnit, renderReconcilePlist } from '../bin/cli.js';
+import { injectWrapper, removeWrapper, MARKER_START, MARKER_END, renderReconcileUnit, renderReconcilePlist, escapeForDoubleQuotes, injectFishWrapper, removeFishWrapper, fishWrapperPath, shellQuote, stopFailureHookEntry } from '../bin/cli.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -121,5 +121,95 @@ describe('removeWrapper', () => {
     await removeWrapper(testFile);
     const content = await readFile(testFile, 'utf-8');
     assert.equal(content, 'just normal content\n');
+  });
+});
+
+// --- Paths are spliced into generated shell code / unit files. `$&` and friends in a
+//     replacement STRING are String.replace patterns, and `$` / backtick / quote are live
+//     inside the double quotes the launcher path sits in. ---
+describe('escapeForDoubleQuotes', () => {
+  it('escapes the characters that are live inside double quotes', () => {
+    assert.equal(escapeForDoubleQuotes('/a b/$HOME/`x`/"q"/\\z'), '/a b/\\$HOME/\\`x\\`/\\"q\\"/\\\\z');
+  });
+  it('leaves an ordinary path alone', () => assert.equal(escapeForDoubleQuotes('/Users/a/moonlighter/src/launcher.js'), '/Users/a/moonlighter/src/launcher.js'));
+});
+
+describe('wrapper substitution is literal', () => {
+  const rc = join(tmpdir(), `car-subst-${Date.now()}`);
+  afterEach(async () => { try { await unlink(rc); } catch {} });
+  it("a launcher path containing $& / $' survives intact (escaped for the shell)", async () => {
+    await writeFile(rc, '');
+    await injectWrapper(rc, "/odd/$&/it's/launcher.js");
+    const content = await readFile(rc, 'utf-8');
+    assert.ok(content.includes("\\$&/it's/launcher.js"), content);
+    assert.ok(!content.includes('__LAUNCHER_PATH__'));
+  });
+  it('the unit and plist renderers do not interpret $-patterns in paths either', () => {
+    assert.equal(renderReconcileUnit('"__NODE_PATH__" "__CLI_PATH__"', '/n/$&', '/c/$1'), '"/n/$&" "/c/$1"');
+    assert.equal(renderReconcilePlist('<s>__NODE_PATH__</s><s>__CLI_PATH__</s>', '/n/$&', '/c/$1'), '<s>/n/$&amp;</s><s>/c/$1</s>');
+  });
+});
+
+describe('fish wrapper', () => {
+  let dir;
+  afterEach(async () => { if (dir) await rm(dir, { recursive: true, force: true }); dir = null; });
+  const fresh = async () => { dir = await mkdtemp(join(tmpdir(), 'car-fish-')); return join(dir, 'fish', 'functions', 'claude.fish'); };
+
+  it('is written under XDG_CONFIG_HOME when set, else ~/.config', () => {
+    assert.equal(fishWrapperPath({ XDG_CONFIG_HOME: '/x' }), '/x/fish/functions/claude.fish');
+    assert.match(fishWrapperPath({}), /\.config\/fish\/functions\/claude\.fish$/);
+  });
+  it('writes a marked claude function that scopes the env var to one command', async () => {
+    const file = await fresh();
+    assert.equal(await injectFishWrapper(file, '/p/launcher.js'), 'written');
+    const text = await readFile(file, 'utf-8');
+    assert.ok(text.includes(MARKER_START) && text.includes(MARKER_END));
+    assert.match(text, /function claude/);
+    assert.match(text, /env CLAUDE_AUTO_RETRY_ACTIVE=1 node "\/p\/launcher\.js" \$argv/);
+    assert.match(text, /command claude \$argv/);   // degrade path
+    assert.ok(!text.includes('__LAUNCHER_PATH__'));
+  });
+  it('is idempotent and updates the launcher path', async () => {
+    const file = await fresh();
+    await injectFishWrapper(file, '/old/launcher.js');
+    assert.equal(await injectFishWrapper(file, '/new/launcher.js'), 'written');
+    const text = await readFile(file, 'utf-8');
+    assert.ok(text.includes('/new/launcher.js') && !text.includes('/old/launcher.js'));
+  });
+  it("never overwrites a claude.fish that is not ours", async () => {
+    const file = await fresh();
+    await mkdir(join(file, '..'), { recursive: true });
+    await writeFile(file, 'function claude\n  echo mine\nend\n');
+    assert.equal(await injectFishWrapper(file, '/p/launcher.js'), 'foreign');
+    assert.equal(await readFile(file, 'utf-8'), 'function claude\n  echo mine\nend\n');
+  });
+  it('removes only its own file', async () => {
+    const file = await fresh();
+    assert.equal(await removeFishWrapper(file), 'absent');
+    await injectFishWrapper(file, '/p/launcher.js');
+    assert.equal(await removeFishWrapper(file), 'removed');
+    await mkdir(join(file, '..'), { recursive: true });
+    await writeFile(file, 'function claude\nend\n');
+    assert.equal(await removeFishWrapper(file), 'foreign');
+    assert.equal(await readFile(file, 'utf-8'), 'function claude\nend\n');
+  });
+  it('escapes a launcher path for fish double quotes', async () => {
+    const file = await fresh();
+    await injectFishWrapper(file, '/odd/$HOME/"x"/launcher.js');
+    assert.ok((await readFile(file, 'utf-8')).includes('"/odd/\\$HOME/\\"x\\"/launcher.js"'));
+  });
+});
+
+describe('StopFailure hook command (quoting)', () => {
+  it('shellQuote single-quotes and escapes embedded single quotes', () => {
+    assert.equal(shellQuote('/a b/c'), "'/a b/c'");
+    assert.equal(shellQuote("/it's"), "'/it'\\''s'");
+  });
+  it('the hook command survives a checkout path with spaces and quotes', () => {
+    const cmd = stopFailureHookEntry("/Users/a b/it's/bin/cli.js").hooks[0].command;
+    assert.equal(cmd, "node '/Users/a b/it'\\''s/bin/cli.js' _stopfailure-hook");
+  });
+  it('still carries the marker install-hook uses to find and replace its own entry', () => {
+    assert.ok(JSON.stringify(stopFailureHookEntry()).includes('_stopfailure-hook'));
   });
 });

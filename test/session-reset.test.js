@@ -1,9 +1,9 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { rm, readFile, writeFile } from 'node:fs/promises';
+import { rm, readFile, writeFile, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { getSessionUsage, invalidateSessionResetCache, probeViaScratchSession, appendUsageLog } from '../src/session-reset.js';
+import { getSessionUsage, invalidateSessionResetCache, probeViaScratchSession, appendUsageLog, isLiveProbeSession } from '../src/session-reset.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 
 // `paneContent` is either a fixed string (every capture returns it) or a function of the
@@ -271,5 +271,96 @@ describe('appendUsageLog', () => {
     await appendUsageLog({ resetAt: 0, percentUsed: null, weeklyPercentUsed: null, weeklyResetText: null }, file);
     const content = await readFile(file, 'utf-8');
     assert.match(content, /5-hour: unknown \| Weekly: unknown/);
+  });
+});
+
+// --- Concurrent monitors. After a "Fix Monitoring" restart every monitor ticks in lockstep, and
+//     the cache's claimedAt (a read-then-write) let all of them pass the check together: each
+//     launched its own scratch Claude, and each one's orphan sweep killed its peers' probes. ---
+describe('probe mutual exclusion', () => {
+  const files = [];
+  afterEach(async () => { await Promise.all(files.flatMap((f) => [rm(f, { force: true }), rm(`${f}.lock`, { force: true })])); files.length = 0; });
+
+  const slowTmux = (delayMs) => {
+    const t = mockScratchTmux(USAGE_PANEL);
+    const realNew = t.newSession;
+    t.newSession = async (...a) => { await new Promise((r) => setTimeout(r, delayMs)); return realNew(...a); };
+    return t;
+  };
+
+  it('six monitors ticking at the same instant run exactly ONE probe', async () => {
+    const file = cacheFile(); files.push(file);
+    const monitors = Array.from({ length: 6 }, () => slowTmux(40));
+    const results = await Promise.all(monitors.map((t) => getSessionUsage(t, DEFAULT_CONFIG, file)));
+    assert.equal(monitors.reduce((n, t) => n + t._newSessions.length, 0), 1, 'one scratch session in total');
+    assert.equal(results.filter((r) => r.fresh).length, 1, 'only the prober reports a fresh reading');
+    for (const r of results) assert.ok(r.resetAt === 0 || r.resetAt > Date.now());
+  });
+
+  it('a monitor that arrives after the probe finished serves the cache instead of probing again', async () => {
+    const file = cacheFile(); files.push(file);
+    const first = mockScratchTmux(USAGE_PANEL);
+    await getSessionUsage(first, DEFAULT_CONFIG, file);
+    const late = mockScratchTmux(USAGE_PANEL);
+    const r = await getSessionUsage(late, DEFAULT_CONFIG, file);
+    assert.equal(r.fresh, false);
+    assert.equal(late._newSessions.length, 0);
+  });
+
+  it('releases the lock afterwards, even when the probe throws', async () => {
+    const file = cacheFile(); files.push(file);
+    const boom = mockScratchTmux(USAGE_PANEL);
+    boom.newSession = async () => { throw new Error('tmux exploded'); };
+    await getSessionUsage(boom, DEFAULT_CONFIG, file);          // probe failure is swallowed
+    await invalidateSessionResetCache(file);
+    const ok = mockScratchTmux(USAGE_PANEL);
+    assert.equal((await getSessionUsage(ok, DEFAULT_CONFIG, file)).fresh, true, 'the next caller is not locked out');
+  });
+
+  it('defers to a live lock held by another probe', async () => {
+    const file = cacheFile(); files.push(file);
+    await writeFile(`${file}.lock`, 'someone-else');
+    const t = mockScratchTmux(USAGE_PANEL);
+    const r = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    assert.equal(r.fresh, false);
+    assert.equal(t._newSessions.length, 0);
+  });
+
+  it('takes over a stale lock left by a probe that died without releasing it', async () => {
+    const file = cacheFile(); files.push(file);
+    await writeFile(`${file}.lock`, 'dead-process');
+    const old = (Date.now() - 5 * 60_000) / 1000;
+    await utimes(`${file}.lock`, old, old);
+    const t = mockScratchTmux(USAGE_PANEL);
+    const r = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    assert.equal(r.fresh, true);
+    assert.equal(t._newSessions.length, 1);
+  });
+
+  it('a probe that failed outright is not reported as a fresh reading', async () => {
+    const file = cacheFile(); files.push(file);
+    const failing = mockScratchTmux('❯ ');            // boots, but the Usage tab has no reset line
+    const r = await getSessionUsage(failing, DEFAULT_CONFIG, file);
+    assert.equal(r.fresh, false, 'otherwise the log claims "Checked /status" for a check that read nothing');
+  });
+});
+
+describe('orphan sweep leaves live peers alone', () => {
+  it('isLiveProbeSession: a recent probe owned by a running process is live', () => {
+    assert.equal(isLiveProbeSession(`car-usage-probe-${process.pid}-${Date.now()}`), true);
+  });
+  it('a dead owner, an ancient timestamp, or an unrecognised shape is an orphan', () => {
+    assert.equal(isLiveProbeSession(`car-usage-probe-99999999-${Date.now()}`), false);
+    assert.equal(isLiveProbeSession(`car-usage-probe-${process.pid}-${Date.now() - 10 * 60_000}`), false);
+    assert.equal(isLiveProbeSession('car-usage-probe-garbage'), false);
+  });
+  it("does not kill a peer's in-flight probe when sweeping", async () => {
+    // 1s old: recent enough to be live, and a different name from the probe under test (same
+    // pid, and a same-millisecond timestamp would collide with it).
+    const peer = `car-usage-probe-${process.pid}-${Date.now() - 1000}`;
+    const t = mockScratchTmux(USAGE_PANEL, [peer, 'car-usage-probe-9999-111']);
+    await probeViaScratchSession(t, DEFAULT_CONFIG);
+    assert.ok(t._killedSessions.includes('car-usage-probe-9999-111'), 'the orphan is still swept');
+    assert.ok(!t._killedSessions.includes(peer), 'the live peer must survive');
   });
 });

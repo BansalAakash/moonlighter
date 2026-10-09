@@ -1,7 +1,7 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, contextLimitMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
+import { stripAnsi, inputBoxDraft, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, contextLimitMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground, newDetachedSession, killSession, listSessionNames } from './tmux.js';
-import { loadConfig } from './config.js';
+import { createConfigReloader } from './config.js';
 import { createLogger } from './logger.js';
 import { readStopFailureEvent, clearStopFailureEvent, isRetryableError } from './events.js';
 import { writeStatus, clearStatus, sweepStaleStatus } from './status-file.js';
@@ -74,6 +74,7 @@ function resetOverload(state) {
   state.overloadWaitUntil = 0;
   state.viaEvent = false;
   state._gaveUp = false;
+  state._overloadGaveUp = false;
   state._eventHandledBanner = null;
 }
 
@@ -189,8 +190,22 @@ function enterOverload(state, overload, rand) {
   return 'overload-detected';
 }
 
+// Is there already text in the input box, and is the user's config set to stand down for it?
+// Remembers what it saw so the caller can say so in the log either way. Never consumes an
+// attempt: a held send is simply not made yet.
+function draftBlocks(state, stripped, config) {
+  const draft = inputBoxDraft(stripped);
+  state._draft = draft === null ? null : draft.slice(0, 80);
+  if (draft === null) return false;
+  if (config.inputBox && config.inputBox.whenOccupied === 'wait') return true;
+  state._overDraft = state._draft;   // proceeding anyway: log that the message lands on a draft
+  return false;
+}
+
 export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, rand = Math.random) {
   if (!isAlive()) return 'exit';
+  state._draft = null;
+  state._overDraft = null;
 
   // The message that resumes THIS session. A per-session override (see session-prompt.js) wins
   // over the global one, for both paths that resume work — the usage-limit retry and the
@@ -331,6 +346,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       }
     }
 
+    if (draftBlocks(state, stripped, config)) {
+      state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return 'draft-held';
+    }
+
     // Increment attempts and set cooldown BEFORE sendKeys so that a failure
     // (e.g. pane destroyed) still consumes a retry and avoids tight-loop errors.
     state.attempts++;
@@ -363,6 +383,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
           return 'overload-relaunched';
         }
         return foregroundOk.isShell ? 'overload-exited-to-shell' : 'skipped-not-claude';
+      }
+
+      if (draftBlocks(state, stripped, config)) {
+        state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+        return 'draft-held';
       }
 
       state.overloadAttempts++;          // next failure backs off further
@@ -405,6 +430,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     if (state.overloadTotalWaitMs >= capMs) {
       state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
       state._gaveUp = true;
+      // Give up LOUDLY — once. The hold re-enters here every ~minute for as long as the stale
+      // banner sits there; without the memo it re-logged the same warning each time. (The
+      // safeguard and context branches already did this.)
+      if (state._overloadGaveUp) return 'overload-holding';
+      state._overloadGaveUp = true;
       return 'overload-gave-up';
     }
 
@@ -435,6 +465,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       }
       state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
       return isShell ? 'overload-exited-to-shell' : 'skipped-not-claude';
+    }
+
+    if (draftBlocks(state, stripped, config)) {
+      state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return 'draft-held';
     }
 
     // Alive at the prompt → send the retry, then schedule the next backoff window.
@@ -491,6 +526,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       return 'skipped-not-claude';
     }
 
+    if (draftBlocks(state, stripped, config)) {
+      state.safeguardWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return 'draft-held';
+    }
+
     // Increment + schedule BEFORE send so a send failure still consumes the slot.
     state.safeguardAttempts++;
     state.safeguardWaitUntil = Date.now() + (safeguard.retryDelaySeconds * 1000);
@@ -540,6 +580,10 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
         state.contextWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
         return 'skipped-not-claude';
       }
+      if (draftBlocks(state, stripped, config)) {
+        state.contextWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+        return 'draft-held';
+      }
       // Clear BEFORE the send: a send failure must not leave the machine primed to resume a
       // second time on the next tick.
       resetContext(state);
@@ -585,6 +629,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       state._lastForeground = fg.fg;
       state.contextWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
       return 'skipped-not-claude';
+    }
+
+    if (draftBlocks(state, stripped, config)) {
+      state.contextWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return 'draft-held';
     }
 
     // Increment + schedule BEFORE the send so a failed send still consumes the slot. The
@@ -633,7 +682,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     state._eventHandledBanner = handledBanner;
   }
 
-  // Event-driven overload (authoritative and faster; see DESIGN-NOTES §1). A StopFailure
+  // Event-driven overload (authoritative and faster; see upstream's DESIGN-NOTES.md §1). A StopFailure
   // marker for this pane means the turn ended in a retryable API error — no scraping, no
   // ambiguity. It runs first, but does NOT replace the scraper below: the event path only
   // covers overloaded/server_error, so a transient render the hook can't emit (an API 429,
@@ -746,13 +795,17 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
 }
 
 export async function startMonitor(pane, pid) {
-  const config = await loadConfig();
+  const reloader = await createConfigReloader();
+  let config = reloader.config;
   const logger = createLogger();
   const state = createMonitorState();
   let consecutiveErrors = 0;
   const MAX_CONSECUTIVE_ERRORS = 10;
 
   await logger.info(`Monitor started for pane ${pane} (claude PID: ${pid})`);
+  if (reloader.startupError) {
+    await logger.warn(`Config file ${reloader.path} ${reloader.startupError}. Running with defaults until it is fixed — edits are picked up automatically.`);
+  }
 
   // Best-effort GC of status files left behind by monitors that died without cleaning up
   // (SIGKILL, host sleep/crash). Runs once per monitor start, not per tick.
@@ -772,7 +825,6 @@ export async function startMonitor(pane, pid) {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  const eventMaxAgeMs = (config.overload?.eventMaxAgeSeconds || 120) * 1000;
   const tmuxAdapter = {
     capturePane, sendKeys, sendKey, getPaneCommand,
     // Only used by session-reset.js's scratch probe — never against this pane.
@@ -782,13 +834,24 @@ export async function startMonitor(pane, pid) {
     // so this is a direct read — no session-id resolution needed.
     // Read at send time, not cached here, so editing the override applies without a restart.
     readSessionPrompt: () => readSessionPrompt(pane, pid),
-    readEvent: () => readStopFailureEvent(pane, eventMaxAgeMs),
+    readEvent: () => readStopFailureEvent(pane, (config.overload?.eventMaxAgeSeconds || 120) * 1000),
     clearEvent: () => clearStopFailureEvent(pane),
   };
   const isAlive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
   const loop = async () => {
     try {
+      // Pick up edits to ~/.claude-auto-retry.json (the shared prompt, retry limits, …) without
+      // a restart. A bad edit keeps the previous good settings and says so, once per edit.
+      const reload = await reloader.refresh();
+      if (reload.changed) {
+        config = reloader.config;
+        await logger.info('Config file changed — reloaded.');
+      }
+      if (reload.error) {
+        await logger.warn(`Config file ${reloader.path} ${reload.error}. Keeping the previous settings until it is fixed.`);
+      }
+
       const result = await processOneTick(state, tmuxAdapter, pane, config, isAlive);
       consecutiveErrors = 0;
 
@@ -806,6 +869,11 @@ export async function startMonitor(pane, pid) {
       // out for a large fraction of every tick). gaveUp flags the terminal states where
       // `status` alone doesn't tell a reader the monitor has stopped acting.
       await writeStatus(pane, {
+        // Identity travels with the snapshot: the filename is a lossy sanitisation of the
+        // socket path and pane id, so a reader (`claude-auto-retry status`) cannot recover
+        // either from it.
+        pane,
+        claudePid: pid,
         status: state.status,
         waitUntil: Math.floor(state.waitUntil / 1000),
         overloadWaitUntil: Math.floor(state.overloadWaitUntil / 1000),
@@ -854,6 +922,18 @@ export async function startMonitor(pane, pid) {
         const pct = state.sessionUsedPercent != null ? `${state.sessionUsedPercent}% used, ` : '';
         await logger.info(`Checked /status while idle — ${pct}session resets in ${secs}s.`);
         if (state._lastUsage) await appendUsageLog(state._lastUsage).catch(() => {});
+      }
+      if (result === 'draft-held') {
+        if (!state._draftHeldLogged) {
+          state._draftHeldLogged = true;
+          await logger.warn(`The input box already holds text ("${state._draft}") and inputBox.whenOccupied is "wait" — not typing over it. Will retry when it is empty.`);
+        }
+      } else {
+        state._draftHeldLogged = false;
+      }
+      if (state._overDraft) {
+        await logger.warn(`The input box already held text ("${state._overDraft}") when the message was typed, so it was appended to it. Set inputBox.whenOccupied to "wait" to hold off instead.`);
+        state._overDraft = null;
       }
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
       if (result === 'skipped-not-claude') await logger.warn(`Foreground is "${state._lastForeground}", not Claude. Skipping send-keys. (Add to foregroundCommands in ~/.claude-auto-retry.json if this is wrong)`);
