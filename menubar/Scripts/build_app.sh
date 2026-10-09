@@ -39,13 +39,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <true/>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
-    <!-- "Attach in Terminal…" and "Tail Log…" drive Terminal.app via AppleScript; macOS
-         shows this string the first time it asks for Automation permission. -->
-    <key>NSAppleEventsUsageDescription</key>
-    <string>Opens a Terminal window attached to a Claude tmux session.</string>
 </dict>
+</plist>
 PLIST
-echo '</plist>' >> "$APP/Contents/Info.plist"
 
 # Ad-hoc signature: a stable code identity, so macOS keeps a login item registered and
 # Gatekeeper doesn't re-verify on every launch. Not a Developer ID signature — a copy
