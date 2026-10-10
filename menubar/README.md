@@ -32,7 +32,7 @@ The menu is a handful of lines, and deliberately shows no log: the app is meant 
 ```
 ☑ Custom printer utility application — resumes in 3h12m   ← one checkbox per session
 ☑ Claude-auto-retry review
-☐ Scratch experiment — won't resume automatically
+☐ Scratch experiment
   Pause All Sessions                  ← or "Resume All Sessions" when any is off
   Session Prompts                  ▸  ← each session's own resume prompt
 ───────────────────────────────

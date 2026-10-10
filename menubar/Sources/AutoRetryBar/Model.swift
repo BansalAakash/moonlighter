@@ -109,7 +109,8 @@ struct Session {
     /// is simply running is the default, expected state, not a fact that earns a word next to
     /// its name every single time you open the menu — only exceptions do.
     var headline: String {
-        if !autoResume { return "won't resume automatically" }
+        // A session that is switched off says so with its unticked checkbox; no words needed.
+        if !autoResume { return "" }
         if isStale { return "not being watched" }
         if status.gaveUp == true { return "stuck — needs you" }
         switch status.status {
