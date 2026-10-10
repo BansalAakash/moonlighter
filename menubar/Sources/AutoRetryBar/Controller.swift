@@ -244,7 +244,11 @@ enum Controller {
         for daysAgo in 0...1 {
             guard let text = try? String(contentsOf: log(daysAgo: daysAgo), encoding: .utf8) else { continue }
             if let line = text.split(separator: "\n").map(String.init).reversed()
-                .first(where: { line in !logChatter.contains { line.contains($0) } }) {
+                .first(where: { line in
+                    // A real entry starts "[timestamp]". An error's second line (tmux's own
+                    // "can't find pane: %N" under a "Monitor tick error") has none and is not an
+                    // event — as the "last" line it would be shown with no time or context.
+                    line.hasPrefix("[") && !logChatter.contains { line.contains($0) } }) {
                 return parse(line)
             }
         }
