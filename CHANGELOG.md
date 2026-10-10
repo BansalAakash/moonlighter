@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-10-10
+
+### Fixed
+- The installer's restart of the monitors could leave an active session unwatched until the next 5-minute
+  timer: it relied on a single timer kick, which lost a race with the monitors it had just stopped. It now
+  re-arms directly and checks that nothing that should be watched is left without a monitor.
+
 ## [1.0.1] - 2026-10-10
 
 ### Fixed

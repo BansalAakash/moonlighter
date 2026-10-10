@@ -78,7 +78,17 @@ if pgrep -f 'src/monitor.js' >/dev/null; then
     pkill -TERM -f 'src/monitor.js' || true
     sleep 2
 fi
-launchctl kickstart -k "gui/$(id -u)/com.claude-auto-retry.reconcile" 2>/dev/null || "$NODE" "$CLI" reconcile >/dev/null 2>&1 || true
+launchctl kickstart -k "gui/$(id -u)/com.claude-auto-retry.reconcile" 2>/dev/null || true
+# Do not trust that one kick: the job can lose a race with the monitors that were just stopped (it did,
+# once, leaving an active session unwatched). Reconcile is idempotent and takes a lock, so running it
+# directly as well costs nothing, and it is checked below rather than assumed.
+sleep 3
+for attempt in 1 2 3; do
+    "$NODE" "$CLI" reconcile >/dev/null 2>&1 || true
+    sleep 2
+    # Every claude session in tmux that is not deliberately switched off should now have a monitor.
+    if ! "$NODE" "$CLI" reconcile --dry-run 2>/dev/null | grep -q "Would arm"; then break; fi
+done
 
 open "$APP"
 
