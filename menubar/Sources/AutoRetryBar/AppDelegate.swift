@@ -16,11 +16,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.menu = menu
         statusItem = item
 
-        refresh()
+        refresh(full: true)
         // 5s matches the monitor's own default poll, so the bar is never more than one tick
-        // behind what the daemon knows. Cheap: a directory read plus one pgrep.
+        // behind what the daemon knows. Cheap: a directory read plus one pgrep. Every 12th tick
+        // (once a minute) is a FULL load, which also finds the sessions that are switched off —
+        // see offSessions for why the menu needs that kept fresh in the background.
+        var tick = 0
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            self?.refresh()
+            tick += 1
+            self?.refresh(full: tick % 12 == 0)
         }
         ensureAlwaysOnPieces()
     }
@@ -63,17 +67,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var loading = false
     private var fullPending = false
 
+    /// The sessions that are switched off (no monitor, so no status file) as of the last FULL
+    /// load. Finding them costs a login shell running node, so the 5-second refresh skips it —
+    /// but the menu is drawn from whatever the last refresh produced, and an open NSMenu does
+    /// not reliably redraw when its items are replaced a moment later. Without this, opening
+    /// the menu showed only the monitored sessions and a switched-off one simply was not there.
+    private var offSessions: [Session] = []
+
+    /// Adds back the remembered switched-off sessions to a quick load, as long as their pane
+    /// still exists and the quick load did not already find them (a session switched back on
+    /// has a monitor again and arrives through the normal path).
+    static func mergeOff(loaded: [Session], cachedOff: [Session], livePanes: Set<String>) -> [Session] {
+        var out = loaded
+        for s in cachedOff where livePanes.contains(s.pane) && !out.contains(where: { $0.pane == s.pane }) {
+            out.append(s)
+        }
+        return out.sorted { $0.pane.compare($1.pane, options: .numeric) == .orderedAscending }
+    }
+
     private func refresh(full: Bool = false) {
         Snapshot.writeHeartbeat()
         // One load at a time. A request that arrives mid-load is remembered (a full one must not
         // be dropped, or the menu would open without the switched-off sessions) and run after.
         if loading { fullPending = fullPending || full; return }
         loading = true
+        let cachedOff = offSessions
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let loaded = full ? Snapshot.loadFull() : Snapshot.load()
+            var loaded = full ? Snapshot.loadFull() : Snapshot.load()
+            if !full && !cachedOff.isEmpty {
+                loaded = Self.mergeOff(loaded: loaded, cachedOff: cachedOff, livePanes: Set(Tmux.panes().keys))
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading = false
+                if full { self.offSessions = loaded.filter { !$0.autoResume } }
                 self.apply(loaded)
                 if self.fullPending { self.fullPending = false; self.refresh(full: true) }
             }
