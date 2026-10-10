@@ -71,6 +71,19 @@ enum SelfTest {
             }
         }
 
+        // --- the menu must not lose switched-off sessions between full loads ---------------------
+        func session(_ pane: String, on: Bool) -> Session {
+            Session(pane: pane, socket: "/s", status: PaneStatus(status: "monitoring", updatedAt: 0),
+                    sessionName: nil, claudePid: 1, monitorPid: nil, autoResume: on)
+        }
+        let merged = AppDelegate.mergeOff(loaded: [session("%10", on: true)],
+                                          cachedOff: [session("%2", on: false), session("%7", on: false), session("%10", on: false)],
+                                          livePanes: ["%2", "%10"])
+        check("a quick load keeps remembered switched-off sessions, in pane order",
+              merged.map(\.pane) == ["%2", "%10"], "\(merged.map(\.pane))")
+        check("...without shadowing a session the quick load found, or resurrecting a closed pane",
+              merged.first(where: { $0.pane == "%10" })?.autoResume == true && !merged.contains(where: { $0.pane == "%7" }))
+
         // --- Icon -------------------------------------------------------------------------------
         check("the menu bar mark is 16pt and a template", Icon.normal.size == NSSize(width: 16, height: 16) && Icon.normal.isTemplate)
 
