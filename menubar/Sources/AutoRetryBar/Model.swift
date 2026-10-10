@@ -154,7 +154,8 @@ struct Session {
 
     static func isPlaceholderTitle(_ s: String) -> Bool {
         let lower = s.lowercased()
-        return ["zsh", "bash", "sh", "fish", "tmux", "node", "claude"].contains(lower)
+        // "claude code" is the title Claude Code itself shows until a conversation has a topic.
+        return ["zsh", "bash", "sh", "fish", "tmux", "node", "claude", "claude code"].contains(lower)
             || lower.hasPrefix("claude-retry-")
     }
 

@@ -92,6 +92,13 @@ enum SelfTest {
         check("with every session on, 'all' switches OFF all of them",
               !allOn.on && allOn.targets.count == 2 && AppDelegate.bulkTitle(for: [session("%1", on: true)]) == "Pause All Sessions")
 
+        var fresh = session("%9", on: true)
+        fresh.title = "✳ Claude Code"; fresh.path = "/Users/a/my-project"
+        check("a brand-new session's default 'Claude Code' title falls back to the folder name",
+              fresh.displayName == "my-project", fresh.displayName)
+        fresh.title = "✳ Sticker printer project"
+        check("a real conversation title is used as is", fresh.displayName == "Sticker printer project")
+
         // --- Icon -------------------------------------------------------------------------------
         check("the menu bar mark is 16pt and a template", Icon.normal.size == NSSize(width: 16, height: 16) && Icon.normal.isTemplate)
 
