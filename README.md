@@ -159,8 +159,9 @@ Clicking it gives you the whole app in a few lines (there is no log in the menu 
 ```
 
 - **Each session is named by what it's working on**, not by process id.
-- **The checkmark is the only per-session setting**: should this one be resumed
-  automatically after a limit resets? Click to toggle.
+- **The checkbox is the only per-session setting**: should this one be resumed
+  automatically after a limit resets? Click to toggle — the menu stays open, so you can flip
+  several in a row — or use **Resume All / Pause All** to switch every session at once.
 - Hold **Option** to reveal *Fix Monitoring*, which restarts every monitor.
 
 More detail in [`menubar/README.md`](menubar/README.md).

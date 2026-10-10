@@ -1,6 +1,13 @@
 import AppKit
 import ServiceManagement
 
+/// A session's row in the menu: a real checkbox. A menu item backed by a VIEW does not dismiss the
+/// menu when it is clicked (a plain item always does), which is what lets several sessions be
+/// switched on or off in a row without reopening the menu each time.
+final class SessionCheckbox: NSButton {
+    var session: Session?
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var refreshTimer: Timer?
@@ -74,6 +81,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// the menu showed only the monitored sessions and a switched-off one simply was not there.
     private var offSessions: [Session] = []
 
+    // The open menu's session rows, so a refresh can update them IN PLACE. Replacing items under
+    // an open menu is unreliable (and would yank a checkbox out from under the pointer).
+    private var rowBoxes: [String: SessionCheckbox] = [:]
+    private var rowPanes: [String] = []
+    private var bulkItem: NSMenuItem?
+    /// Panes with a toggle still being applied: a refresh arriving before the change lands would
+    /// otherwise flip the checkbox back for a moment.
+    private var pendingToggles: Set<String> = []
+
     /// Adds back the remembered switched-off sessions to a quick load, as long as their pane
     /// still exists and the quick load did not already find them (a session switched back on
     /// has a monitor again and arrives through the normal path).
@@ -117,7 +133,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.imagePosition = label.isEmpty ? .imageOnly : .imageLeading
         button.title = label.isEmpty ? "" : " \(label)"
 
-        if isMenuOpen, let menu = statusItem?.menu { rebuild(menu) }
+        if isMenuOpen, let menu = statusItem?.menu { refreshOpenMenu(menu) }
+    }
+
+    /// Updates an open menu without replacing its items when the set of sessions is unchanged.
+    private func refreshOpenMenu(_ menu: NSMenu) {
+        guard sessions.map(\.pane) == rowPanes else { rebuild(menu); return }
+        for s in sessions {
+            guard let box = rowBoxes[s.pane] else { continue }
+            box.session = s
+            if !pendingToggles.contains(s.pane) { style(box, for: s) }
+        }
+        bulkItem?.title = Self.bulkTitle(for: sessions)
     }
 
     /// What the bar shows for a set of sessions: the mark plus the text beside it. Static so
@@ -177,15 +204,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // unticked for a session that only ever had the editor opened on it.
         SessionPrompt.pruneUnedited(sessions)
 
-        // 1. Every Claude session and what it is doing right now.
+        // 1. Every Claude session, each a checkbox: ticked = picked back up after a limit resets.
+        rowBoxes = [:]
+        rowPanes = sessions.map(\.pane)
+        bulkItem = nil
         if sessions.isEmpty {
             let empty = NSMenuItem(title: "No Claude sessions running", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
         } else {
+            let width = rowWidth(for: sessions)
             for session in sessions {
-                menu.addItem(sessionItem(session))
+                menu.addItem(sessionItem(session, width: width))
             }
+            if sessions.count > 1 {
+                let all = NSMenuItem(title: Self.bulkTitle(for: sessions), action: #selector(toggleAll), keyEquivalent: "")
+                all.target = self
+                all.toolTip = "Switch automatic resume on (or off) for every session at once."
+                menu.addItem(all)
+                bulkItem = all
+            }
+            if let prompts = promptsItem() { menu.addItem(prompts) }
         }
 
         menu.addItem(.separator())
@@ -214,68 +253,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add(menu, "Quit", #selector(quit), key: "q")
     }
 
-    /// One line per session, purely informational: what it is doing, and (via the checkmark)
-    /// whether it will be picked back up automatically. Nothing here is a click target — a row
-    /// whose visible text is "Custom printer utility — running" gave no hint that clicking it
-    /// actually flipped an unrelated setting, which is exactly the kind of thing a first-time
-    /// user has no way to guess. The actual controls live one level down, in the submenu, each
-    /// spelled out as a full sentence rather than a term ("auto-resume") nobody was told the
-    /// meaning of.
-    private func sessionItem(_ s: Session) -> NSMenuItem {
-        let title = s.headline.isEmpty ? s.displayName : "\(s.displayName) — \(s.headline)"
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.state = s.autoResume ? .on : .off
-        if s.health == .attention {
-            // The one state that should catch the eye. Colour is an addition to the wording,
-            // never the only carrier of it — "stuck — needs you" already says so.
-            item.attributedTitle = NSAttributedString(
-                string: item.title,
-                attributes: [.foregroundColor: NSColor.systemRed])
-        }
-        item.submenu = sessionSubmenu(s)
+    /// "Dir — resumes in 3h12m", or just the name when there is nothing worth saying.
+    private func rowTitle(_ s: Session) -> String {
+        s.headline.isEmpty ? s.displayName : "\(s.displayName) — \(s.headline)"
+    }
+
+    private func rowWidth(for sessions: [Session]) -> CGFloat {
+        let font = NSFont.menuFont(ofSize: 0)
+        let widest = sessions.map { (rowTitle($0) as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+        return min(max(300, ceil(widest) + 58), 520)
+    }
+
+    private func style(_ box: SessionCheckbox, for s: Session) {
+        box.state = s.autoResume ? .on : .off
+        // Red is the one state that should catch the eye — never the only carrier of it: the
+        // wording already says "stuck — needs you".
+        let color: NSColor = s.health == .attention ? .systemRed : .labelColor
+        box.attributedTitle = NSAttributedString(string: rowTitle(s), attributes: [
+            .font: NSFont.menuFont(ofSize: 0), .foregroundColor: color,
+        ])
+    }
+
+    /// One checkbox per session. See SessionCheckbox for why it is a view rather than a plain item.
+    private func sessionItem(_ s: Session, width: CGFloat) -> NSMenuItem {
+        let box = SessionCheckbox(frame: NSRect(x: 12, y: 1, width: width - 24, height: 20))
+        box.setButtonType(.switch)
+        box.target = self
+        box.action = #selector(sessionToggled(_:))
+        box.lineBreakMode = .byTruncatingTail
+        box.toolTip = "Tick to pick this session back up automatically when a usage limit resets."
+        box.session = s
+        style(box, for: s)
+        rowBoxes[s.pane] = box
+
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 22))
+        row.addSubview(box)
+        let item = NSMenuItem()
+        item.view = row
         return item
     }
 
-    /// This session's controls, spelled out as sentences a first-time user can act on without
-    /// having read a README: whether it resumes itself, and (only once there's a Claude process
-    /// to send a prompt to) which prompt it gets and a one-click way back to the shared one.
-    private func sessionSubmenu(_ s: Session) -> NSMenu {
+    /// Which way "all" goes, and which sessions it needs to touch: any session that is off →
+    /// turn everything ON; otherwise turn everything OFF.
+    static func bulkPlan(for sessions: [Session]) -> (on: Bool, targets: [Session]) {
+        let on = sessions.contains { !$0.autoResume }
+        return (on, sessions.filter { $0.autoResume != on })
+    }
+
+    static func bulkTitle(for sessions: [Session]) -> String {
+        bulkPlan(for: sessions).on ? "Resume All Sessions" : "Pause All Sessions"
+    }
+
+    /// Per-session prompts, in one submenu: with the sessions themselves now being checkbox rows
+    /// there is no per-session submenu to hang them from. Only sessions with a Claude process
+    /// can be sent a prompt.
+    private func promptsItem() -> NSMenuItem? {
+        let eligible = sessions.filter { $0.claudePid != nil }
+        guard !eligible.isEmpty else { return nil }
         let sub = NSMenu()
-
-        let resume = NSMenuItem(title: "Continue Automatically When Limit Resets",
-                                action: #selector(toggleAutoResume(_:)), keyEquivalent: "")
-        resume.target = self
-        resume.representedObject = s
-        resume.state = s.autoResume ? .on : .off
-        sub.addItem(resume)
-
-        if s.claudePid != nil {
-            sub.addItem(.separator())
+        for s in eligible {
             let isCustom = SessionPrompt.isCustom(for: s)
-            let prompt = NSMenuItem(title: isCustom ? "Custom Prompt" : "Shared Prompt",
-                                    action: #selector(editSessionPrompt(_:)), keyEquivalent: "")
-            prompt.target = self
-            prompt.representedObject = s
-            prompt.state = isCustom ? .on : .off
-            prompt.toolTip = isCustom
-                ? "This session is sent its own prompt, not the shared one, when it resumes. "
-                + "Click to edit it."
+            let edit = NSMenuItem(title: "\(s.displayName) — \(isCustom ? "Custom Prompt…" : "Shared Prompt…")",
+                                  action: #selector(editSessionPrompt(_:)), keyEquivalent: "")
+            edit.target = self
+            edit.representedObject = s
+            edit.state = isCustom ? .on : .off
+            edit.toolTip = isCustom
+                ? "This session is sent its own prompt, not the shared one, when it resumes. Click to edit it."
                 : "This session is sent the shared prompt when it resumes. Click to give it its own."
-            sub.addItem(prompt)
-
+            sub.addItem(edit)
             // Only offered once a session actually IS customised — the way back to the shared
-            // prompt, without having to know (or retype) its exact text.
+            // prompt without having to retype its text.
             if isCustom {
-                let revert = NSMenuItem(title: "Use Shared Prompt Instead",
+                let revert = NSMenuItem(title: "     Use the shared prompt for \(s.displayName) instead",
                                         action: #selector(revertSessionPrompt(_:)), keyEquivalent: "")
                 revert.target = self
                 revert.representedObject = s
-                revert.toolTip = "Discard this session's own prompt; it goes back to the shared one."
                 sub.addItem(revert)
             }
         }
-
-        return sub
+        let item = NSMenuItem(title: "Session Prompts", action: nil, keyEquivalent: "")
+        item.submenu = sub
+        return item
     }
 
     // MARK: - Actions
@@ -289,13 +348,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func toggleAutoResume(_ sender: NSMenuItem) {
-        guard let s = sender.representedObject as? Session else { return }
+    @objc private func sessionToggled(_ sender: SessionCheckbox) {
+        guard let s = sender.session else { return }
+        let on = sender.state == .on          // the click already flipped it; this is the wish
+        pendingToggles.insert(s.pane)
         // Both directions shell out (exclude-self, or reconcile after the file edit), which is
-        // slow enough to freeze the menu bar if done inline. Refresh from the real state when
-        // it finishes rather than optimistically flipping the checkmark.
+        // slow enough to freeze the menu bar if done inline. The menu stays open throughout.
         DispatchQueue.global(qos: .userInitiated).async {
-            Controller.setAutoResume(!s.autoResume, for: s)
+            Controller.setAutoResume(on, for: [s])
+            DispatchQueue.main.async {
+                self.pendingToggles.remove(s.pane)
+                self.refresh(full: true)
+            }
+        }
+    }
+
+    @objc private func toggleAll() {
+        let plan = Self.bulkPlan(for: sessions)
+        guard !plan.targets.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            Controller.setAutoResume(plan.on, for: plan.targets)
             DispatchQueue.main.async { self.refresh(full: true) }
         }
     }

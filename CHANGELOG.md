@@ -65,6 +65,7 @@ Fork of upstream 0.7.3. Installed from source with `./install.sh`; not published
   rules, the footer, and the U+00A0 in the empty `❯ ` input row. 564 tests pass.
 
 ### Changed
+- **Menu bar: sessions are checkboxes, and the menu stays open.** Switching a session on or off used to close the menu, so changing several meant reopening it each time. Each session is now a checkbox row (a view-backed item, which AppKit does not dismiss), the rows update in place while the menu is open, and a new **Resume All / Pause All** item switches every session at once. Per-session prompts moved into one **Session Prompts** submenu.
 - **The menu bar menu no longer shows a log line.** The "last event" row (`7h ago · Sent retry message`, `Checked /status…`, stray errors) was information nobody running this unattended can act on. A session that needs a person still shows as red `stuck — needs you`.
 - **The menu bar icon is no longer identical to Claude's own.** It is still the Claude spark, now
   with a small crescent moon in the lower-right corner (a nod to "moonlighter"), drawn in code

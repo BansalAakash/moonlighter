@@ -30,30 +30,30 @@ reasons unrelated to the monitor. The pid is needed to *act* on a monitor, not t
 The menu is a handful of lines, and deliberately shows no log: the app is meant to run on its own, and an event nobody can act on is noise. The one thing that does stand out is a session marked `stuck — needs you` (red). Anything that would always be switched on is not a choice:
 
 ```
-✓ Custom printer utility application — resumes in 3h12m   ▸   ← one line per session;
-✓ Claude-auto-retry review                                 ▸     its controls are the submenu
-  Scratch experiment — won't resume automatically          ▸
+☑ Custom printer utility application — resumes in 3h12m   ← one checkbox per session
+☑ Claude-auto-retry review
+☐ Scratch experiment — won't resume automatically
+  Pause All Sessions                  ← or "Resume All Sessions" when any is off
+  Session Prompts                  ▸  ← each session's own resume prompt
 ───────────────────────────────
-Edit Shared Prompt…                         ← hold ⌥ to swap this for "Fix Monitoring"
+Edit Shared Prompt…                   ← hold ⌥ to swap this for "Fix Monitoring"
 ───────────────────────────────
 ✓ Open at Login
 Quit
 ```
 
-A session's submenu holds its controls, each spelled out as a sentence:
-
-```
-✓ Continue Automatically When Limit Resets     ← the one per-session setting
-─────────────────────────────────
-  Shared Prompt  /  ✓ Custom Prompt            ← click to edit; ticked once it really differs
-  Use Shared Prompt Instead                    ← only offered once a session has its own
-```
+**The checkboxes don't close the menu.** Each session row is a real checkbox (a view-backed menu
+item, which AppKit does not dismiss on click), so several sessions can be switched on or off in
+a row. While the menu is open the rows update in place instead of being replaced. "Resume All /
+Pause All" does the lot in one click: if any session is off it switches everything on, otherwise
+it switches everything off. "Session Prompts" lists each session with a Claude process, ticked
+once its prompt really differs from the shared one, with a way back to the shared prompt.
 
 The session line is the whole status display: `running`, `resumes in 3h12m`,
 `compacting, then resuming`, `API busy — retrying`, or `stuck — needs you` (red). Sessions
 whose tmux pane no longer exists are not listed at all — a leftover status file is not news.
 
-**"Continue Automatically When Limit Resets" is the per-session setting, and there is only one.** Unticking it runs
+**The checkbox is the per-session setting, and there is only one.** Unticking it runs
 `exclude-self` for that pane, which records the session by claude PID — the self-expiring
 form, so the entry dies with the session and can never mute a later one that inherits the
 pid — and stops its monitor. That is what the 5-minute reconcile consults, so OFF sticks

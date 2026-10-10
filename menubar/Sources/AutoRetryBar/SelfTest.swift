@@ -84,6 +84,14 @@ enum SelfTest {
         check("...without shadowing a session the quick load found, or resurrecting a closed pane",
               merged.first(where: { $0.pane == "%10" })?.autoResume == true && !merged.contains(where: { $0.pane == "%7" }))
 
+        // --- "all sessions" ------------------------------------------------------------------------
+        let mixed = AppDelegate.bulkPlan(for: [session("%1", on: true), session("%2", on: false), session("%3", on: false)])
+        check("with any session off, 'all' switches ON and touches only the ones that are off",
+              mixed.on && mixed.targets.map(\.pane) == ["%2", "%3"])
+        let allOn = AppDelegate.bulkPlan(for: [session("%1", on: true), session("%2", on: true)])
+        check("with every session on, 'all' switches OFF all of them",
+              !allOn.on && allOn.targets.count == 2 && AppDelegate.bulkTitle(for: [session("%1", on: true)]) == "Pause All Sessions")
+
         // --- Icon -------------------------------------------------------------------------------
         check("the menu bar mark is 16pt and a template", Icon.normal.size == NSSize(width: 16, height: 16) && Icon.normal.isTemplate)
 

@@ -41,6 +41,17 @@ enum Controller {
         }
     }
 
+    /// Several sessions at once: one reconcile for the lot when switching ON, rather than one per
+    /// session (each is a login shell plus node).
+    static func setAutoResume(_ on: Bool, for sessions: [Session]) {
+        if on {
+            for s in sessions { ExcludeList.include(pane: s.pane, claudePid: s.claudePid) }
+            _ = reconcile()
+        } else {
+            for s in sessions { _ = Shell.login("TMUX_PANE=\(s.pane) claude-auto-retry exclude-self 2>&1") }
+        }
+    }
+
     static func restartAllMonitors() {
         for s in Snapshot.load() { if let pid = s.monitorPid { kill(pid_t(pid), SIGTERM) } }
         usleep(600_000)
