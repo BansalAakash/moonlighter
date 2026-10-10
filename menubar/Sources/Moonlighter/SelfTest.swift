@@ -1,6 +1,6 @@
 import Foundation
 
-/// `AutoRetryBar --self-test` — checks the parts that can wedge or silently misread, without a
+/// `Moonlighter --self-test` — checks the parts that can wedge or silently misread, without a
 /// GUI or an XCTest toolchain (the package has no test target, and CI/CLT-only machines may not
 /// ship XCTest). Prints one line per check and exits non-zero if any failed.
 enum SelfTest {

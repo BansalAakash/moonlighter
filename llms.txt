@@ -9,13 +9,13 @@
 > exponential backoff with jitter; safeguard/AUP false positives get a bounded immediate
 > re-send. tmux-based, so it keeps working after you disconnect.
 
-Install (from source — this fork is not published to npm; `npm i -g claude-auto-retry` installs
-the upstream project, which lacks context-limit compaction, per-session prompts and the menu
-bar app):
+Install (Apple Silicon Mac; the app bundles its own Node, so only tmux is needed):
 
-    git clone https://github.com/BansalAakash/moonlighter.git
-    cd moonlighter
-    ./install.sh
+    curl -fsSL https://github.com/BansalAakash/moonlighter/releases/latest/download/install.sh | bash
+
+Linux or from source: `git clone https://github.com/BansalAakash/moonlighter.git && cd moonlighter && ./install.sh`.
+This is a fork; `npm i -g claude-auto-retry` installs the upstream project, which lacks context-limit
+compaction, per-session prompts and the menu bar app.
 
 Then open a new terminal and use `claude` as usual. Check on it with
 `claude-auto-retry status` (per-session state) and `claude-auto-retry logs`.
@@ -52,11 +52,11 @@ Docs:
 
 ## Install for a user (agent-friendly)
 
-- `git clone https://github.com/BansalAakash/moonlighter.git && cd moonlighter && ./install.sh`
-  — links the CLI, installs the shell function (bash/zsh/fish) and the repair timer, and builds
-  the menu bar app on macOS. Idempotent; re-run after switching Node versions. Takes effect in
-  new shells.
+- `curl -fsSL https://github.com/BansalAakash/moonlighter/releases/latest/download/install.sh | bash`
+  — installs Moonlighter.app (own Node included), the shell function (bash/zsh/fish), the repair
+  timer and the menu bar app; installs tmux with Homebrew if missing. Idempotent; re-run to upgrade.
+  Takes effect in new shells.
 - `claude-auto-retry install-hook` — optional: event-driven overload detection via Claude Code's
   StopFailure hook (edits `~/.claude/settings.json`, so it is not done automatically)
 - Verify: `claude-auto-retry status`
-- Remove: `claude-auto-retry uninstall` (and `uninstall-hook`, `uninstall-timer`)
+- Remove: `claude-auto-retry uninstall --all`, then drag Moonlighter.app to the Trash

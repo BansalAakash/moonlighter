@@ -1,4 +1,4 @@
-# AutoRetryBar
+# Moonlighter.app (the menu bar app)
 
 A macOS menu bar agent for [claude-auto-retry](../README.md): see what every monitored Claude
 Code session is doing, and act on it, without attaching to a single tmux pane.
@@ -106,21 +106,25 @@ single-instance lock and pane→claude mapping stay the single source of truth.
 ## Build
 
 ```bash
-./Scripts/build_app.sh          # → AutoRetryBar.app (ad-hoc signed)
-cp -R AutoRetryBar.app /Applications/
-open /Applications/AutoRetryBar.app
+./packaging/build_mac_app.sh        # from the repo root → dist/Moonlighter-Apple-Silicon.{dmg,zip}
+./packaging/verify_build.sh         # starts the built app's Node and CLI against a throwaway $HOME
 ```
 
-Requires macOS 13+ and a Swift toolchain. `LSUIElement` — no Dock icon.
+Requires macOS 13+ on Apple Silicon and a Swift toolchain. The app is self-contained: this Swift
+menu bar app, the `claude-auto-retry` package, and its own Node (downloaded from nodejs.org and
+checked against the published checksums). `LSUIElement` — no Dock icon. See
+[`packaging/`](../packaging) for the release flow.
 
 ## Debugging
 
 ```bash
-/Applications/AutoRetryBar.app/Contents/MacOS/AutoRetryBar --dump
-/Applications/AutoRetryBar.app/Contents/MacOS/AutoRetryBar --login-item on|off
-/Applications/AutoRetryBar.app/Contents/MacOS/AutoRetryBar --auto-resume %1 on|off
-/Applications/AutoRetryBar.app/Contents/MacOS/AutoRetryBar --self-test
-/Applications/AutoRetryBar.app/Contents/MacOS/AutoRetryBar --render-icon out.png [scale]
+/Applications/Moonlighter.app/Contents/MacOS/Moonlighter --dump
+/Applications/Moonlighter.app/Contents/MacOS/Moonlighter --login-item on|off
+/Applications/Moonlighter.app/Contents/MacOS/Moonlighter --auto-resume %1 on|off
+/Applications/Moonlighter.app/Contents/MacOS/Moonlighter --self-test
+/Applications/Moonlighter.app/Contents/MacOS/Moonlighter --render-icon out.png [scale]
+/Applications/Moonlighter.app/Contents/MacOS/Moonlighter --render-app-icon out.png [px]
+/Applications/Moonlighter.app/Contents/MacOS/Moonlighter --setup
 ```
 
 `--dump` prints everything the menu would show and exits. There is no window, so without this

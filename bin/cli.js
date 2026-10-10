@@ -10,102 +10,25 @@ import { writeStopFailureEvent, isRetryableError } from '../src/events.js';
 import { sweepStaleStatus } from '../src/status-file.js';
 import { todayLogFile } from '../src/logger.js';
 import { readAllSnapshots, renderSessionLines } from '../src/status-report.js';
+import {
+  MARKER_START, MARKER_END, escapeForDoubleQuotes, injectWrapper, removeWrapper,
+  fishWrapperPath, injectFishWrapper, removeFishWrapper,
+} from '../src/shell-wrapper.js';
+import {
+  runSetup, runUninstallAll, appBundleRoot, bundledNodePath, renderReconcilePlist,
+} from '../src/setup.js';
 import { reconcile, excludeSelf, parseRunningMonitors, PGREP_LIST_FLAG } from '../src/reconcile.js';
+
+export { renderReconcilePlist };
+export {
+  MARKER_START, MARKER_END, escapeForDoubleQuotes, injectWrapper, removeWrapper,
+  fishWrapperPath, injectFishWrapper, removeFishWrapper,
+};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SRC_DIR = join(__dirname, '..', 'src');
 const LAUNCHER_PATH = join(SRC_DIR, 'launcher.js');
-const WRAPPER_TEMPLATE = join(SRC_DIR, 'wrapper.sh');
-const FISH_WRAPPER_TEMPLATE = join(SRC_DIR, 'wrapper.fish');
-
-export const MARKER_START = '# >>> claude-auto-retry >>>';
-export const MARKER_END = '# <<< claude-auto-retry <<<';
-
-// --- Wrapper injection ---
-
-// The launcher path is spliced into a double-quoted string in the generated shell code, so
-// the characters that are live inside double quotes must be escaped — and the substitution
-// itself must use a replacer FUNCTION, because String.replace treats `$&`, `$1`, `$'` in a
-// replacement STRING as patterns and would silently mangle a path containing them.
-export function escapeForDoubleQuotes(path) {
-  return path.replace(/[\\"$`]/g, '\\$&');
-}
-
-export async function injectWrapper(rcFile, launcherPath) {
-  let content = '';
-  try {
-    content = await readFile(rcFile, 'utf-8');
-  } catch {
-    // File doesn't exist, create it
-  }
-
-  const template = await readFile(WRAPPER_TEMPLATE, 'utf-8');
-  const wrapper = template.replace(/__LAUNCHER_PATH__/g, () => escapeForDoubleQuotes(launcherPath));
-
-  // Remove existing wrapper if present
-  const startIdx = content.indexOf(MARKER_START);
-  const endIdx = content.indexOf(MARKER_END);
-  if (startIdx !== -1 && endIdx !== -1) {
-    const afterMarker = endIdx + MARKER_END.length;
-    // Skip the newline after MARKER_END if present, but don't blindly +1
-    const skipTo = content[afterMarker] === '\n' ? afterMarker + 1
-                 : content.slice(afterMarker, afterMarker + 2) === '\r\n' ? afterMarker + 2
-                 : afterMarker;
-    content = content.slice(0, startIdx) + content.slice(skipTo);
-  }
-
-  content = content.trimEnd() + '\n\n' + wrapper + '\n';
-  await writeFile(rcFile, content);
-}
-
-export async function removeWrapper(rcFile) {
-  let content;
-  try {
-    content = await readFile(rcFile, 'utf-8');
-  } catch {
-    return;
-  }
-
-  const startIdx = content.indexOf(MARKER_START);
-  const endIdx = content.indexOf(MARKER_END);
-  if (startIdx === -1 || endIdx === -1) return;
-
-  const before = content.slice(0, startIdx).trimEnd();
-  const after = content.slice(endIdx + MARKER_END.length).trimStart();
-  content = before + (after ? '\n' + after : '\n');
-  await writeFile(rcFile, content);
-}
-
-// --- fish ---
-// fish has no rc-file wrapper to splice into: functions autoload from functions/<name>.fish,
-// so the wrapper is a file of its own. It is only ever written or removed when it is OURS
-// (carries the marker) — an existing claude.fish the user wrote is left alone.
-
-export function fishWrapperPath(env = process.env) {
-  return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'fish', 'functions', 'claude.fish');
-}
-
-// 'written' | 'foreign' (a claude.fish that is not ours exists; untouched)
-export async function injectFishWrapper(file, launcherPath) {
-  try {
-    const existing = await readFile(file, 'utf-8');
-    if (!existing.includes(MARKER_START)) return 'foreign';
-  } catch { /* absent — create it */ }
-  const template = await readFile(FISH_WRAPPER_TEMPLATE, 'utf-8');
-  await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, template.replace(/__LAUNCHER_PATH__/g, () => escapeForDoubleQuotes(launcherPath)));
-  return 'written';
-}
-
-// 'removed' | 'foreign' | 'absent'
-export async function removeFishWrapper(file) {
-  let content;
-  try { content = await readFile(file, 'utf-8'); } catch { return 'absent'; }
-  if (!content.includes(MARKER_START)) return 'foreign';
-  await unlink(file);
-  return 'removed';
-}
 
 // --- tmux install ---
 
@@ -207,7 +130,26 @@ async function cmdInstall() {
   console.log('\nNote: If you switch Node versions (nvm), re-run: claude-auto-retry install');
 }
 
+async function cmdUninstallAll() {
+  const r = await runUninstallAll({ skipLaunchd: process.argv.includes('--no-launchd') });
+  for (const st of r.steps) console.log(`${st.ok ? 'ok  ' : 'FAIL'} ${st.name}: ${st.detail}`);
+  await cmdUninstallHook().catch(() => {});
+  console.log('\nMoonlighter is uninstalled. Drag Moonlighter.app to the Trash to finish.');
+  console.log('Your settings and history (~/.claude-auto-retry.json, ~/.claude-auto-retry/) were left in place.');
+  if (!r.ok) process.exitCode = 1;
+}
+
+async function cmdSetup() {
+  const json = process.argv.includes('--json');
+  const r = await runSetup({ skipLaunchd: process.argv.includes('--no-launchd') });
+  if (json) { console.log(JSON.stringify(r)); return; }
+  for (const st of r.steps) console.log(`${st.ok ? 'ok  ' : 'FAIL'} ${st.name}${st.detail ? `: ${st.detail}` : ''}`);
+  console.log(r.tmux.found ? `ok   tmux: ${r.tmux.version}` : 'FAIL tmux: not found — install it with `brew install tmux`');
+  if (!r.ok || !r.tmux.found) process.exitCode = 1;
+}
+
 async function cmdUninstall() {
+  if (process.argv.includes('--all')) return cmdUninstallAll();
   const bashrc = join(homedir(), '.bashrc');
   const zshrc = join(homedir(), '.zshrc');
   for (const rc of [bashrc, zshrc]) { await removeWrapper(rc); }
@@ -266,13 +208,13 @@ export function shellQuote(s) {
   return "'" + String(s).replace(/'/g, "'\\''") + "'";
 }
 
-export function stopFailureHookEntry(scriptPath = __filename) {
+export function stopFailureHookEntry(scriptPath = __filename, nodePath = null) {
   // Matcher filters on the StopFailure error type; only the transient-overload classes.
   // rate_limit is intentionally omitted — a session/usage limit is an hours-scale wait
   // owned by the scraper usage path, not a seconds-scale event retry (see src/events.js).
   return {
     matcher: 'overloaded|server_error',
-    hooks: [{ type: 'command', command: `node ${shellQuote(scriptPath)} ${HOOK_MARKER}`, timeout: 5 }],
+    hooks: [{ type: 'command', command: `${nodePath ? shellQuote(nodePath) : 'node'} ${shellQuote(scriptPath)} ${HOOK_MARKER}`, timeout: 5 }],
   };
 }
 
@@ -304,7 +246,8 @@ async function cmdInstallHook() {
   const existing = Array.isArray(settings.hooks.StopFailure) ? settings.hooks.StopFailure : [];
   // Idempotent: drop any prior entry pointing at our handler, then add the current one.
   const kept = existing.filter((e) => !JSON.stringify(e).includes(HOOK_MARKER));
-  kept.push(stopFailureHookEntry());
+  const root = appBundleRoot();
+  kept.push(stopFailureHookEntry(__filename, root ? bundledNodePath(root) : null));
   settings.hooks.StopFailure = kept;
   await mkdir(dirname(settingsPath), { recursive: true });
   await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n');
@@ -355,16 +298,6 @@ export function renderReconcileUnit(template, nodePath, cliPath) {
 // launchd variant: the placeholders sit inside <string> elements, so the substituted
 // paths must be XML-escaped (an '&' in an nvm dir name would otherwise corrupt the
 // plist; spaces need no quoting — each ProgramArguments <string> is one argv entry).
-function xmlEscape(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-export function renderReconcilePlist(template, nodePath, cliPath) {
-  return template
-    .replace(/__NODE_PATH__/g, () => xmlEscape(nodePath))
-    .replace(/__CLI_PATH__/g, () => xmlEscape(cliPath));
-}
-
 // macOS: install the reconcile LaunchAgent into ~/Library/LaunchAgents and load it via
 // launchctl bootstrap into the user's gui domain. RunAtLoad + StartInterval=300 mirror
 // the systemd timer's OnStartupSec/OnUnitActiveSec cadence.
@@ -526,6 +459,7 @@ const command = process.argv[2];
 
 switch (command) {
   case 'install': await cmdInstall(); break;
+  case 'setup': await cmdSetup(); break;
   case 'uninstall': await cmdUninstall(); break;
   case 'install-hook': await cmdInstallHook(); break;
   case 'uninstall-hook': await cmdUninstallHook(); break;
@@ -541,7 +475,8 @@ switch (command) {
     console.log('claude-auto-retry - Auto-retry Claude Code on subscription rate limits\n');
     console.log('Usage:');
     console.log('  claude-auto-retry install            Install shell wrapper + tmux');
-    console.log('  claude-auto-retry uninstall          Remove shell wrapper');
+    console.log('  claude-auto-retry uninstall          Remove shell wrapper (--all: also the timer, watchdog and command)');
+    console.log('  claude-auto-retry setup [--json]     Wire the packaged app in: shell function, repair timer, watchdog');
     console.log('  claude-auto-retry install-hook [dir] Install the StopFailure hook (event-driven');
     console.log('                                       overload detection) into <dir>/settings.json');
     console.log('                                       (default: $CLAUDE_CONFIG_DIR or ~/.claude)');

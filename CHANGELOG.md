@@ -5,9 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-10-09
+## [1.0.0] - 2026-10-10
 
-Fork of upstream 0.7.3. Installed from source with `./install.sh`; not published to npm.
+First packaged release of Moonlighter, a fork of upstream 0.7.3. Not published to npm: it is a Mac app
+(Apple Silicon) installed with one line, or from source with `./install.sh`.
+
+### Added (packaging)
+- **Moonlighter.app** — a self-contained menu bar app: the Swift app, this package and its own Node
+  (checksum-verified from nodejs.org). Installs with
+  `curl -fsSL https://github.com/BansalAakash/moonlighter/releases/latest/download/install.sh | bash`
+  or from the DMG; the only prerequisite is tmux, which the installer (or the app) installs with Homebrew.
+  Built and verified by `packaging/build_mac_app.sh` and `packaging/verify_build.sh`, published by
+  `packaging/publish_release.sh` as a GitHub release.
+- **First-run setup, every launch.** The app runs `claude-auto-retry setup`, which installs the `claude`
+  shell function (pinned to the bundled Node), a `claude-auto-retry` command in `~/.local/bin`, the
+  repair timer and a watchdog — and reports "unchanged" without touching anything when there is
+  nothing to do. `claude-auto-retry uninstall --all` undoes all of it.
+- The app tells you when tmux is missing (a dialog at launch and a red menu row) and offers to install it.
+- A proper app icon (the spark with its moon, on a dark rounded square).
+- The app is now `Moonlighter.app` (was `AutoRetryBar.app`); the bundle id is unchanged so the login item
+  carries over, and the installer migrates the old app and its watchdog.
+
+### Changed
+- `install.sh` on a Mac builds and installs the same app a release contains.
+- Apple Silicon only; there is no Intel build.
+
+## [Fork changes before the first packaged release] - 2026-10-09
 
 ### Added
 - **Weekly limits wait for their date.** A banner such as `resets Oct 9, 10am` /

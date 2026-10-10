@@ -7,21 +7,22 @@
 # This checks the heartbeat the app writes on every refresh tick (see Snapshot.writeHeartbeat
 # in Model.swift) and force-restarts it if that heartbeat has stopped moving, in addition to
 # the plain "it's not running at all" case. Runs every 60s via
-# com.moonlighter.autoretrybar.watchdog.plist so it survives sleep/wake, network changes,
+# com.moonlighter.watchdog.plist so it survives sleep/wake, network changes,
 # and reboots without depending on macOS's Login Items list.
 set -u
 
-APP=/Applications/AutoRetryBar.app
+APP="${1:-/Applications/Moonlighter.app}"
+NAME="$(basename "$APP" .app)"   # the executable inside is named after the app
 HEARTBEAT="$HOME/.claude-auto-retry/menubar-heartbeat"
 STALE_AFTER=90   # 3 missed 5s ticks, same tolerance the app itself uses for a dead monitor
 
 restart() {
-    pkill -x AutoRetryBar 2>/dev/null
+    pkill -x "$NAME" 2>/dev/null
     sleep 1
     open -a "$APP"
 }
 
-if ! pgrep -x AutoRetryBar >/dev/null; then
+if ! pgrep -x "$NAME" >/dev/null; then
     open -a "$APP"
     exit 0
 fi

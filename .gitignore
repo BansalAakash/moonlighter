@@ -3,3 +3,5 @@ menubar/.build/
 menubar/*.app/
 *.log
 .DS_Store
+build/
+dist/

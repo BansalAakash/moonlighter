@@ -23,8 +23,10 @@ enum Shell {
     /// clock, so the deadline only ever applied to a process that had already finished — a hung
     /// child blocked the caller indefinitely, and on the main thread that froze the menu bar.
     @discardableResult
-    static func run(_ launchPath: String, _ args: [String], timeout: TimeInterval = 10) -> (out: String, status: Int32) {
+    static func run(_ launchPath: String, _ args: [String], timeout: TimeInterval = 10,
+                    environment: [String: String]? = nil) -> (out: String, status: Int32) {
         let p = Process()
+        if let environment { p.environment = environment }
         p.executableURL = URL(fileURLWithPath: launchPath)
         p.arguments = args
         let pipe = Pipe()
@@ -133,7 +135,7 @@ enum Tmux {
     ///   "  %0 → claude 27374 (monitor 92080)"
     ///   "  %1 → claude 79121: skipped (already monitored)"
     static func claudePanes() -> [String: Int] {
-        let (out, _) = Shell.login("unset TMUX_PANE; claude-auto-retry reconcile --dry-run 2>&1", timeout: 15)
+        let (out, _) = Controller.cli(["reconcile", "--dry-run"], timeout: 15)
         var map: [String: Int] = [:]
         let pattern = try! NSRegularExpression(pattern: #"(%\d+)\s*→\s*claude\s+(\d+)"#)
         for line in out.split(separator: "\n") {

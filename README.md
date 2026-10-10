@@ -28,27 +28,41 @@ Everything runs on your machine. No account, no network calls, no dependencies.
 
 ---
 
-## Requirements
-
-- **macOS or Linux** (the menu bar app is macOS 13+ only; the CLI works on both)
-- **Node 18+**
-- **tmux** — installed for you if missing
-- **Claude Code**
-
 ## Install
+
+**On a Mac with Apple Silicon (macOS 13+), one line:**
+
+```bash
+curl -fsSL https://github.com/BansalAakash/moonlighter/releases/latest/download/install.sh | bash
+```
+
+That puts **Moonlighter.app** in your Applications folder and opens it. It brings its own copy of
+everything it runs (including Node), so the only thing it needs from you is
+[tmux](https://github.com/tmux/tmux) — if you don't have it, the installer runs `brew install tmux`
+(or, if you open the app first, it offers to). Then open a **new** terminal and use `claude`
+exactly as you always do. That's the whole setup, and running the line again is how you upgrade.
+
+Prefer a disk image? Download **Moonlighter-Apple-Silicon.dmg** from the
+[latest release](https://github.com/BansalAakash/moonlighter/releases/latest) and drag the app to
+Applications. macOS will not open an app downloaded in a browser the first time: open it, then go to
+**System Settings → Privacy & Security** and choose **Open Anyway**. (The one-line install skips this.)
+
+On first launch the app wires itself in: the `claude` shell function (in `~/.zshrc` / `~/.bashrc`, or
+`~/.config/fish/functions/claude.fish`), a `claude-auto-retry` command, the 5-minute repair timer and
+a watchdog that restarts the menu bar app if it ever sticks. All of it is undone with
+`claude-auto-retry uninstall --all` (then drag the app to the Trash); your settings and history
+are left alone.
+
+**Linux, or building it yourself** (the CLI works on both; the menu bar app is macOS only):
 
 ```bash
 git clone https://github.com/BansalAakash/moonlighter.git
 cd moonlighter
-./install.sh
+./install.sh        # macOS: builds the same app a release contains (needs Xcode's command line tools)
+                    # Linux: needs Node 18+ and tmux; installs the CLI only
 ```
 
-Then open a new terminal. That's the whole setup.
-
-The script links the CLI, adds a `claude` shell function (to your `~/.zshrc` / `~/.bashrc`,
-or `~/.config/fish/functions/claude.fish` for fish), installs the 5-minute repair timer, and
-on macOS builds and launches the menu bar app. It's safe to re-run — do that after switching
-Node versions, which strands the shell wrapper.
+You also need **Claude Code**, of course.
 
 ## Using it
 
@@ -118,7 +132,7 @@ late rather than not at all.
 |---|---|---|
 | `status` lists no sessions | Claude wasn't launched through the wrapper — you ran `command claude`, set `CLAUDE_AUTO_RETRY_NO_TMUX=1` outside tmux, or an app started the `claude` binary directly | Launch with `claude` from a normal shell, or run `claude-auto-retry reconcile` to attach monitors to sessions already running in tmux |
 | A session shows "not being watched" | Its monitor stopped (killed, or the machine crashed) | `claude-auto-retry reconcile`; the repair timer also does this within 5 minutes |
-| Worked yesterday, not today | You switched Node versions. The shell wrapper and the repair timer both pin an absolute Node path | Re-run `./install.sh` |
+| Worked yesterday, not today (source / Linux install) | You switched Node versions. The shell wrapper and the repair timer pin an absolute Node path | Re-run `./install.sh`. (The app install is unaffected: it carries its own Node.) |
 | One session is skipped, others work | Its auto-resume checkmark is off in the menu bar app | Click it back on |
 | Claude is stopped but never resumes | It's waiting on a **permission prompt**, not a limit. No retry message can clear that | Run unattended sessions in a mode that doesn't stop to ask |
 | Everything vanished | The Mac rebooted — a macOS update, or a crash. tmux sessions do not survive a reboot, and with FileVault on, nothing runs at all until someone logs in | Nothing to recover; the menu bar app returns at login |
@@ -238,7 +252,7 @@ Sending keystrokes into your terminal is only safe if the detection is strict, s
 
 The project is **Moonlighter**. The command line tool, the shell function's launcher and the
 data directory (`~/.claude-auto-retry/`, `~/.claude-auto-retry.json`) keep the upstream name
-`claude-auto-retry`, and the menu bar app is `AutoRetryBar`. They were deliberately not renamed:
+`claude-auto-retry`, and the menu bar app is `Moonlighter.app`. The first two were deliberately not renamed:
 the shell function, the launchd jobs and every running monitor refer to those paths, so a rename
 would strand existing installs.
 

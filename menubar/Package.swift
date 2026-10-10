@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "AutoRetryBar",
+    name: "Moonlighter",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(name: "AutoRetryBar")
+        .executableTarget(name: "Moonlighter")
     ]
 )

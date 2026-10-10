@@ -8,6 +8,79 @@ import ServiceManagement
 enum Controller {
     static let launchAgentLabel = "com.claude-auto-retry.reconcile"
 
+    // MARK: - The CLI
+
+    /// The Node runtime and CLI that ship INSIDE the app bundle (Resources/runtime/node and
+    /// Resources/moonlighter/bin/cli.js), or nil when this binary is run from a source build.
+    static var bundledRuntime: (node: String, cli: String)? {
+        guard let res = Bundle.main.resourcePath else { return nil }
+        let node = res + "/runtime/node", cli = res + "/moonlighter/bin/cli.js"
+        let fm = FileManager.default
+        return fm.isExecutableFile(atPath: node) && fm.fileExists(atPath: cli) ? (node, cli) : nil
+    }
+
+    /// Homebrew's prefixes, which a GUI app's launchd PATH lacks — the CLI shells out to tmux.
+    static let pathWithHomebrew: String = {
+        let have = (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(separator: ":").map(String.init)
+        return (["/opt/homebrew/bin", "/usr/local/bin"].filter { !have.contains($0) } + have).joined(separator: ":")
+    }()
+
+    /// Runs `claude-auto-retry <args>`: the copy inside the app when packaged (its own Node, its
+    /// own code — nothing about the user's shell or Node setup can break it), otherwise through a
+    /// login shell exactly as before, so a source build still works.
+    ///
+    /// TMUX_PANE is the CLI's notion of "self": unset for the app (it is not any pane and wants
+    /// full coverage), set to the target pane for `exclude-self`.
+    @discardableResult
+    static func cli(_ args: [String], pane: String? = nil, timeout: TimeInterval = 60) -> (out: String, status: Int32) {
+        if let rt = bundledRuntime {
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = pathWithHomebrew
+            env.removeValue(forKey: "TMUX")
+            if let pane { env["TMUX_PANE"] = pane } else { env.removeValue(forKey: "TMUX_PANE") }
+            return Shell.run(rt.node, [rt.cli] + args, timeout: timeout, environment: env)
+        }
+        let prefix = pane.map { "TMUX_PANE=\($0) " } ?? "unset TMUX_PANE; "
+        return Shell.login("\(prefix)claude-auto-retry \(args.joined(separator: " ")) 2>&1", timeout: timeout)
+    }
+
+    // MARK: - First-run setup
+
+    struct SetupOutcome {
+        var ok: Bool
+        var tmuxFound: Bool
+        var problems: [String]
+    }
+
+    /// Wires the bundled package into this Mac: the `claude` shell function, the repair timer, the
+    /// watchdog and the `claude-auto-retry` command. Idempotent (the CLI reports "unchanged" and
+    /// touches nothing), so it runs on every launch. nil for a source build.
+    static func runSetup() -> SetupOutcome? {
+        guard bundledRuntime != nil else { return nil }
+        let (out, _) = cli(["setup", "--json"], timeout: 120)
+        guard let data = out.split(separator: "\n").last.flatMap({ $0.data(using: .utf8) }),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return SetupOutcome(ok: false, tmuxFound: true, problems: ["setup did not run"])
+        }
+        let tmux = (obj["tmux"] as? [String: Any])?["found"] as? Bool ?? true
+        let problems = (obj["steps"] as? [[String: Any]] ?? [])
+            .filter { ($0["ok"] as? Bool) == false }
+            .map { "\($0["name"] as? String ?? "?"): \($0["detail"] as? String ?? "")" }
+        return SetupOutcome(ok: (obj["ok"] as? Bool) ?? false, tmuxFound: tmux, problems: problems)
+    }
+
+    static var brewPath: String? { Shell.firstExisting(["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]) }
+
+    /// `brew install tmux`. Long (it can build), so the caller must not be the main thread.
+    static func installTmuxWithHomebrew() -> Bool {
+        guard let brew = brewPath else { return false }
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = pathWithHomebrew
+        env["HOMEBREW_NO_AUTO_UPDATE"] = "1"       // a fast install, not a full brew update first
+        env["HOMEBREW_NO_ENV_HINTS"] = "1"
+        return Shell.run(brew, ["install", "tmux"], timeout: 900, environment: env).status == 0
+    }
+
     // MARK: - Reconcile / monitors
 
     /// Re-arm a monitor for every live claude pane that lacks one.
@@ -19,7 +92,7 @@ enum Controller {
     /// app was launched (from a terminal during development, it would inherit one).
     @discardableResult
     static func reconcile() -> String {
-        Shell.login("unset TMUX_PANE; claude-auto-retry reconcile 2>&1").out
+        cli(["reconcile"]).out
     }
 
     /// The one per-session setting: will this session be picked back up after a limit resets?
@@ -37,7 +110,7 @@ enum Controller {
             ExcludeList.include(pane: session.pane, claudePid: session.claudePid)
             _ = reconcile()
         } else {
-            _ = Shell.login("TMUX_PANE=\(session.pane) claude-auto-retry exclude-self 2>&1")
+            _ = cli(["exclude-self"], pane: session.pane)
         }
     }
 
@@ -48,7 +121,7 @@ enum Controller {
             for s in sessions { ExcludeList.include(pane: s.pane, claudePid: s.claudePid) }
             _ = reconcile()
         } else {
-            for s in sessions { _ = Shell.login("TMUX_PANE=\(s.pane) claude-auto-retry exclude-self 2>&1") }
+            for s in sessions { _ = cli(["exclude-self"], pane: s.pane) }
         }
     }
 
@@ -65,7 +138,7 @@ enum Controller {
     }
 
     static func setTimer(enabled: Bool) -> String {
-        Shell.login("claude-auto-retry \(enabled ? "install-timer" : "uninstall-timer") 2>&1").out
+        cli([enabled ? "install-timer" : "uninstall-timer"]).out
     }
 
     // MARK: - Launch at login

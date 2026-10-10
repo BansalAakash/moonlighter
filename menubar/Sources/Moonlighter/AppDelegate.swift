@@ -48,7 +48,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// policy. Failures are ignored: the app works without either.
     private func ensureAlwaysOnPieces() {
         DispatchQueue.global(qos: .utility).async {
-            if !Controller.timerInstalled { _ = Controller.setTimer(enabled: true) }
+            if let outcome = Controller.runSetup() {
+                // Packaged app: setup did the wiring (shell function, timer, watchdog, command).
+                if !outcome.tmuxFound { DispatchQueue.main.async { self.tmuxMissing = true; self.offerTmux() } }
+            } else if !Controller.timerInstalled {
+                _ = Controller.setTimer(enabled: true)   // source build: just keep the timer
+            }
 
             let defaults = UserDefaults.standard
             if !defaults.bool(forKey: Self.didFirstRunSetupKey) {
@@ -80,6 +85,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// not reliably redraw when its items are replaced a moment later. Without this, opening
     /// the menu showed only the monitored sessions and a switched-off one simply was not there.
     private var offSessions: [Session] = []
+
+    /// tmux is what Moonlighter watches sessions through. Without it nothing works, so this is
+    /// said plainly — once as a dialog at launch, and for as long as it stays true, as a menu row.
+    private var tmuxMissing = false
+    private var installingTmux = false
 
     // The open menu's session rows, so a refresh can update them IN PLACE. Replacing items under
     // an open menu is unreliable (and would yank a checkbox out from under the pointer).
@@ -203,6 +213,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Drop seeded-but-unedited session prompts before drawing, so "Custom Prompt" is
         // unticked for a session that only ever had the editor opened on it.
         SessionPrompt.pruneUnedited(sessions)
+
+        if tmuxMissing {
+            let warn = NSMenuItem(title: installingTmux ? "Installing tmux…" : "tmux isn't installed — click to fix",
+                                  action: installingTmux ? nil : #selector(offerTmux), keyEquivalent: "")
+            warn.target = self
+            warn.attributedTitle = NSAttributedString(string: warn.title, attributes: [.foregroundColor: NSColor.systemRed])
+            menu.addItem(warn)
+            menu.addItem(.separator())
+        }
 
         // 1. Every Claude session, each a checkbox: ticked = picked back up after a limit resets.
         rowBoxes = [:]
@@ -335,6 +354,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let item = NSMenuItem(title: "Session Prompts", action: nil, keyEquivalent: "")
         item.submenu = sub
         return item
+    }
+
+    // MARK: - tmux
+
+    /// Offers to install tmux with Homebrew when it can, and says exactly what to run when it can't.
+    @objc private func offerTmux() {
+        guard tmuxMissing, !installingTmux else { return }
+        let alert = NSAlert()
+        alert.messageText = "Moonlighter needs tmux"
+        alert.alertStyle = .warning
+        if Controller.brewPath != nil {
+            alert.informativeText = "Moonlighter watches your Claude sessions through tmux, which isn't installed yet. "
+                + "It can install it for you with Homebrew (about a minute)."
+            alert.addButton(withTitle: "Install tmux")
+            alert.addButton(withTitle: "Later")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            installingTmux = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                let ok = Controller.installTmuxWithHomebrew()
+                DispatchQueue.main.async {
+                    self.installingTmux = false
+                    if ok {
+                        self.tmuxMissing = false
+                        _ = Controller.reconcile()      // sessions already running can be picked up now
+                        self.refresh(full: true)
+                    } else {
+                        Controller.notify("Couldn't install tmux", "Run this in Terminal, then reopen Moonlighter:\n\nbrew install tmux")
+                    }
+                }
+            }
+        } else {
+            alert.informativeText = "Moonlighter watches your Claude sessions through tmux, which isn't installed. "
+                + "Install Homebrew from brew.sh, then run this in Terminal:\n\nbrew install tmux\n\nand reopen Moonlighter."
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
     }
 
     // MARK: - Actions

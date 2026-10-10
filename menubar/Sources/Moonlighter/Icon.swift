@@ -11,9 +11,11 @@ enum Icon {
     /// 16pt leaves the ~2pt of vertical breathing room the system status items use.
     static let size = NSSize(width: 16, height: 16)
 
-    // The badge, in points on the 16x16 canvas (origin bottom-left). The halo is a knockout ring
-    // cut out of the spark so the crescent reads as its own shape instead of smudging into the
-    // spark's arms at this size; it is sized so the whole badge stays inside the canvas.
+    // The badge, in units of the 16x16 design canvas (origin bottom-left); everything below scales
+    // with the size asked for, so the same geometry serves the 16pt menu bar glyph and a 1024px
+    // app icon. The halo is a knockout ring cut out of the spark so the crescent reads as its own
+    // shape instead of smudging into the spark's arms; it is sized so the whole badge stays inside
+    // the canvas.
     private static let badgeCenter = NSPoint(x: 11.9, y: 4.1)
     private static let haloRadius: CGFloat = 4.1
     private static let moonRadius: CGFloat = 3.1
@@ -26,43 +28,88 @@ enum Icon {
         NSBezierPath(ovalIn: NSRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2))
     }
 
-    /// A filled crescent, as its own image: a disc with a second disc bitten out of it.
-    private static let crescent: NSImage = {
-        let image = NSImage(size: size)
-        image.lockFocus()
-        NSColor.black.set()
-        circle(badgeCenter, moonRadius).fill()
-        NSGraphicsContext.current?.compositingOperation = .destinationOut
-        circle(NSPoint(x: badgeCenter.x + biteOffset.x, y: badgeCenter.y + biteOffset.y), biteRadius).fill()
-        image.unlockFocus()
-        return image
-    }()
-
-    /// The spark with the moon badge. Everything below recolours or templates THIS, so all three
-    /// states (normal, dimmed, attention) carry the same mark.
-    private static let base: NSImage = {
-        let spark: NSImage
+    private static func loadSpark() -> NSImage {
         if let url = Bundle.main.url(forResource: "claude-logo", withExtension: "svg"),
            let image = NSImage(contentsOf: url) {
-            image.size = size
-            spark = image
-        } else {
-            // build_app.sh always bundles the SVG; an empty image is a quiet degrade over a
-            // status bar glyph rather than a crash if it's ever somehow missing.
-            spark = NSImage(size: size)
+            return image
         }
-        let composed = NSImage(size: size)
-        composed.lockFocus()
-        spark.draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .sourceOver, fraction: 1)
+        // build_app.sh always bundles the SVG; an empty image is a quiet degrade over a status bar
+        // glyph rather than a crash if it's ever somehow missing.
+        return NSImage(size: size)
+    }
+
+    /// The spark with the moon badge, drawn as vectors at `side` points square, the moon in
+    /// `moon`. Transparent outside the mark.
+    static func markImage(side: CGFloat, moon: NSColor) -> NSImage {
+        let spark = loadSpark()
+        let k = side / size.width                  // design units → points
+        let image = NSImage(size: NSSize(width: side, height: side))
+        image.lockFocus()
+        spark.draw(in: NSRect(x: 0, y: 0, width: side, height: side), from: .zero, operation: .sourceOver, fraction: 1)
+
+        let t = NSAffineTransform()
+        t.scale(by: k)
         // Cut the halo out of the spark, then lay the crescent into the clearing.
         NSGraphicsContext.current?.compositingOperation = .destinationOut
         NSColor.black.set()
-        circle(badgeCenter, haloRadius).fill()
+        t.transform(circle(badgeCenter, haloRadius)).fill()
+
         NSGraphicsContext.current?.compositingOperation = .sourceOver
-        crescent.draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .sourceOver, fraction: 1)
-        composed.unlockFocus()
-        return composed
-    }()
+        let crescent = NSImage(size: NSSize(width: side, height: side))
+        crescent.lockFocus()
+        moon.set()
+        t.transform(circle(badgeCenter, moonRadius)).fill()
+        NSGraphicsContext.current?.compositingOperation = .destinationOut
+        NSColor.black.set()
+        t.transform(circle(NSPoint(x: badgeCenter.x + biteOffset.x, y: badgeCenter.y + biteOffset.y), biteRadius)).fill()
+        crescent.unlockFocus()
+        crescent.draw(in: NSRect(x: 0, y: 0, width: side, height: side), from: .zero, operation: .sourceOver, fraction: 1)
+        image.unlockFocus()
+        return image
+    }
+
+    /// The menu bar mark. Everything below recolours or templates THIS, so all three states
+    /// (normal, dimmed, attention) carry the same mark.
+    private static let base: NSImage = markImage(side: size.width, moon: .black)
+
+    /// The Finder / Dock icon: the mark on a dark warm rounded square, moon in cream. `px` is the
+    /// pixel size (1024 for the iconset master). Follows the macOS icon grid: the body fills about
+    /// 80% of the canvas, centred, with a soft shadow in the margin.
+    static func renderAppIcon(to path: String, px: Int) -> Bool {
+        let n = CGFloat(px)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return false }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        ctx.imageInterpolation = .high
+
+        let body = NSRect(x: n * 0.1, y: n * 0.1, width: n * 0.8, height: n * 0.8)
+        let shape = NSBezierPath(roundedRect: body, xRadius: body.width * 0.2237, yRadius: body.width * 0.2237)
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
+        shadow.shadowOffset = NSSize(width: 0, height: -n * 0.012)
+        shadow.shadowBlurRadius = n * 0.025
+        shadow.set()
+        NSColor(red: 0.13, green: 0.10, blue: 0.09, alpha: 1).setFill()
+        shape.fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        NSGradient(starting: NSColor(red: 0.27, green: 0.20, blue: 0.17, alpha: 1),
+                   ending: NSColor(red: 0.10, green: 0.08, blue: 0.075, alpha: 1))?.draw(in: shape, angle: -90)
+
+        let side = body.width * 0.66
+        let mark = markImage(side: side, moon: NSColor(red: 0.98, green: 0.92, blue: 0.80, alpha: 1))
+        mark.draw(in: NSRect(x: body.midX - side / 2, y: body.midY - side / 2, width: side, height: side),
+                  from: .zero, operation: .sourceOver, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let data = rep.representation(using: .png, properties: [:]) else { return false }
+        return (try? data.write(to: URL(fileURLWithPath: path))) != nil
+    }
 
     /// Writes the composed mark (as the menu bar draws it: black on transparent) to a PNG at
     /// `scale`x, for `--render-icon`. Lets the badge be inspected at a size a human can see.
