@@ -27,33 +27,34 @@ jobs:
       - run: npm test
 
   menubar:
-    name: Menu bar app (Swift)
+    name: Menu bar app (build, self-test, package)
     runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: menubar
     steps:
       - uses: actions/checkout@v4
-      - name: Build
-        run: swift build -c release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       # The app has no XCTest target; --self-test is its test suite (shell timeouts, countdown
       # text, snapshot contract, tmux pane-list parsing without a locale).
-      - name: Self-test
-        run: .build/release/AutoRetryBar --self-test
-      - name: Bundle and validate
+      - name: Build and self-test
+        working-directory: menubar
         run: |
-          ./Scripts/build_app.sh
-          plutil -lint AutoRetryBar.app/Contents/Info.plist
-          codesign --verify --strict AutoRetryBar.app
+          swift build -c release
+          .build/release/Moonlighter --self-test
+      # The real thing: the .app with its own Node, then started the way a user's Mac would meet it
+      # (against a throwaway $HOME; launchd is skipped).
+      - name: Package and verify the app
+        run: |
+          ./packaging/build_mac_app.sh
+          ./packaging/verify_build.sh
 
   scripts:
     name: Shell scripts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Syntax-check the installer and helper scripts
+      - name: Syntax-check the installers and helper scripts
         run: |
           bash -n install.sh
-          bash -n menubar/Scripts/build_app.sh
-          bash -n menubar/Scripts/watchdog.sh
+          for f in packaging/*.sh launchd/watchdog.sh; do bash -n "$f"; done
           sh -n bin/tmux-status.sh
