@@ -2,6 +2,22 @@
 
 **Claude Code stops when you're not there. This keeps it going.**
 
+## Quick start (Mac with Apple Silicon, macOS 13+)
+
+1. Open the **Terminal** app and paste this, then press Enter:
+   ```bash
+   curl -fsSL https://github.com/BansalAakash/moonlighter/releases/latest/download/install.sh | bash
+   ```
+2. Wait about a minute. It installs Moonlighter into Applications and opens it (and installs
+   [tmux](https://github.com/tmux/tmux) with Homebrew if you don't have it).
+3. Open a **new** Terminal window and run Claude Code by typing `claude`, as you always do.
+
+That's it. A spark-and-moon icon appears in your menu bar; click it to see your sessions, each with a
+checkbox for automatic resume. Sessions started with `claude` in Terminal are watched — sessions in the
+Claude Code desktop app are not. Details, the DMG option and removal are under [Install](#install) below.
+
+---
+
 You give Claude Code a long job and go to bed. An hour later it hits your usage limit
 and stops:
 
