@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  node:
+    name: Node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # The suite shells out to bash and, where present, zsh (tests skip cleanly without it).
+      # Installing zsh on Linux makes the zsh trap test run there too instead of skipping.
+      - name: Install zsh (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
+      - run: npm test
+
+  menubar:
+    name: Menu bar app (Swift)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: menubar
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build -c release
+      # The app has no XCTest target; --self-test is its test suite (shell timeouts, countdown
+      # text, snapshot contract, tmux pane-list parsing without a locale).
+      - name: Self-test
+        run: .build/release/AutoRetryBar --self-test
+      - name: Bundle and validate
+        run: |
+          ./Scripts/build_app.sh
+          plutil -lint AutoRetryBar.app/Contents/Info.plist
+          codesign --verify --strict AutoRetryBar.app
+
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check the installer and helper scripts
+        run: |
+          bash -n install.sh
+          bash -n menubar/Scripts/build_app.sh
+          bash -n menubar/Scripts/watchdog.sh
+          sh -n bin/tmux-status.sh
