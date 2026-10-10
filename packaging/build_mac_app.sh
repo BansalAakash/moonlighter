@@ -117,7 +117,15 @@ PLIST
     DMG="$ROOT/dist/Moonlighter-$LABEL.dmg"; ZIP="$ROOT/dist/Moonlighter-$LABEL.zip"
     STAGE="$(mktemp -d)"; cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
     rm -f "$DMG" "$ZIP"
-    hdiutil create -volname "Moonlighter" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+    # hdiutil sizes the image from the folder itself, and that estimate intermittently comes up short
+    # ("create failed - No space left on device", seen locally and on CI, with plenty of disk free).
+    # An explicit size with headroom avoids it; the final image is compressed, so it does not bloat.
+    SIZE_MB=$(( $(du -sm "$STAGE" | cut -f1) * 12 / 10 + 64 ))
+    for attempt in 1 2 3; do
+        if hdiutil create -volname "Moonlighter" -srcfolder "$STAGE" -ov -format UDZO -fs HFS+ -size "${SIZE_MB}m" "$DMG" >/dev/null; then break; fi
+        [ "$attempt" = 3 ] && { echo "hdiutil could not create the DMG." >&2; exit 1; }
+        echo "  hdiutil failed (attempt $attempt); retrying…" >&2; rm -f "$DMG"; sleep 3
+    done
     rm -rf "$STAGE"
     # ditto keeps the bundle's links and signature intact, which zip does not.
     ditto -c -k --norsrc --keepParent "$APP" "$ZIP"
