@@ -425,7 +425,7 @@ export function sessionTargetsByPane(processes, byPid, panePidToPane) {
 // resolves to the same pane, prefer the foreground one (stat contains '+').
 //
 // Returns { arm: [{pane, pid, cwdHint?}], skipped: [{pane, pid, reason}] }.
-export function planReconcile({ panes, processes, running, selfPane = null, exclude = [] }) {
+export function planReconcile({ panes, processes, running, selfPane = null, exclude = [], skipPanes = new Set() }) {
   const byPid = new Map(processes.map(p => [p.pid, p]));
   const panePidToPane = new Map(panes.map(p => [p.panePid, p.pane]));
   const excluded = new Set(exclude);
@@ -451,6 +451,9 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
 
   const arm = [], skipped = [];
   for (const [pane, procs] of byPane) {
+    // Moonlighter's own throwaway `claude` for the usage probe: it lives for seconds and must not be
+    // watched (the monitor would start, find nothing, and exit — noise, and a process per probe).
+    if (skipPanes.has(pane)) continue;
     // Pane-id reuse: pick the foreground claude ('+' in stat), else the highest pid
     // (most-recently-started) as a stable tiebreak.
     let target = procs.find(p => p.stat.includes('+'));
@@ -476,6 +479,15 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
 }
 
 // --- Impure runner ---
+
+// Panes belonging to Moonlighter's scratch usage-probe session (see session-reset.js). `-f` needs
+// tmux 3.2+; on an older tmux the filter errors and nothing is skipped — the previous behaviour.
+export async function scratchProbePanes() {
+  try {
+    const { stdout } = await execFile('tmux', ['list-panes', '-a', '-f', '#{m:car-usage-probe-*,#{session_name}}', '-F', '#{pane_id}']);
+    return new Set(stdout.split('\n').map((l) => l.trim()).filter(Boolean));
+  } catch { return new Set(); }
+}
 
 async function gather() {
   const [{ stdout: panesOut }, { stdout: psOut }] = await Promise.all([
@@ -521,7 +533,7 @@ export async function reconcile({ selfPane = process.env.TMUX_PANE || null, dryR
   try {
     const { panes, processes, running } = await gather();
     const exclude = await readExcludeFile();
-    const plan = planReconcile({ panes, processes, running, selfPane, exclude });
+    const plan = planReconcile({ panes, processes, running, selfPane, exclude, skipPanes: await scratchProbePanes() });
     const armed = [];
     if (!dryRun) {
       const socket = panes.find(p => p.socket)?.socket || null;

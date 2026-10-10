@@ -210,6 +210,13 @@ describe('pruneExcludeEntries (Finding 5)', () => {
 });
 
 describe('planReconcile', () => {
+  it("never arms a monitor on Moonlighter's own scratch probe pane", () => {
+    const { panes, processes } = fixture();
+    const { arm, skipped } = planReconcile({ panes, processes, running: new Map(), skipPanes: new Set(['%2']) });
+    assert.deepEqual(arm, [{ pane: '%1', pid: 200 }]);
+    assert.ok(!skipped.some((s) => s.pane === '%2'), 'and does not report it as a skipped session either');
+  });
+
   it('arms a monitor for each live claude pane', () => {
     const { panes, processes } = fixture();
     const { arm } = planReconcile({ panes, processes, running: new Map() });
