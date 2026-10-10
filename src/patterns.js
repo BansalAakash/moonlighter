@@ -820,6 +820,31 @@ export function isInputBoxEmpty(text) {
   return false;
 }
 
+// A fingerprint of the CONVERSATION as it stands: the last few real content lines, with everything
+// that comes and goes on its own taken out — UI furniture, the input box (so a half-typed draft is
+// not "activity"), and the limit banner itself, which Claude Code now removes by itself when the
+// limit resets.
+//
+// That last part is why this exists. A usage-limit wait used to end by finding the banner either
+// still there (so: send the continuation) or gone because the user had carried on (so: stand
+// down). But the banner now vanishes on its own at the reset, leaving an idle session that needs
+// the nudge — and "banner gone" was read as "user continued", so nothing was sent. The two cases
+// differ in one way: if the user continued, the conversation moved on. Comparing this fingerprint
+// from when the wait began with the one at expiry says which it was.
+export function transcriptSignature(text, n = 8) {
+  const all = stripAnsi(text).split('\n');
+  // Cut at the input box's top rule (a rule directly followed by the prompt row), if there is one.
+  let end = all.length;
+  for (let i = all.length - 2; i >= 0; i--) {
+    if (/^\s*[─━]{8,}/.test(all[i]) && /^\s*[❯>]/.test(all[i + 1])) { end = i; break; }
+  }
+  return all.slice(0, end)
+    .filter((l) => !isChromeLine(l)
+      && !LIMIT_PATTERNS.some((p) => p.test(l))
+      && !RESET_PATTERNS.some((p) => p.test(l)))
+    .slice(-n).map((l) => l.trim()).join('\n');
+}
+
 // The text sitting in the input box, or null when the box is empty (or cannot be read).
 //
 // Used to know whether typing a message would land on top of a half-written draft. It is

@@ -1,6 +1,6 @@
 {
   "name": "claude-auto-retry",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Keep Claude Code working while you're away: auto-resume after usage limits, auto-/compact when the context window fills, and a macOS menu bar app to watch it all.",
   "type": "module",
   "bin": {

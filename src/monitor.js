@@ -1,4 +1,4 @@
-import { stripAnsi, inputBoxDraft, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, contextLimitMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
+import { stripAnsi, inputBoxDraft, transcriptSignature, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, contextLimitMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground, newDetachedSession, killSession, listSessionNames } from './tmux.js';
 import { createConfigReloader } from './config.js';
@@ -146,6 +146,9 @@ function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
   // banner is never re-parsed — no window for stray reset-shaped text to move it, and none
   // of the ~600 dead re-derivations a 5h wait would otherwise run.
   state._waitIsFallback = !parsed;
+  // What the conversation looked like when the wait began, so the end of the wait can tell "the
+  // limit cleared on its own and the session is sitting idle" from "the user carried on".
+  state._waitSig = transcriptSignature(stripped);
   state._gaveUp = false;
   if (fresh) state.attempts = 0;
   return 'waiting';
@@ -306,7 +309,17 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // captured scrollback after a successful resume — spamming an actively-working
     // session (and a banner re-printed by another process keeps it "rate-limited" the
     // whole time). Resumed ⇒ the session continued; never inject into it.
-    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
+    const bannerGone = !isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES);
+    // The banner can vanish by itself at the reset. If so, and the conversation is exactly as it
+    // was when the wait began and nothing is running, the user did NOT continue — the session is
+    // idle and needs the resume message. A changed conversation, or live work, means they did.
+    const clearedIdle = bannerGone
+      && !resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)
+      && !isWorking(stripped)
+      && !!state._waitSig
+      && transcriptSignature(stripped) === state._waitSig;
+    state._sendingAfterBannerGone = clearedIdle;
+    if ((bannerGone || resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) && !clearedIdle) {
       // Diagnostic only, not a behavior change: a real resume can't happen seconds into a
       // wait that has hours left on it — more likely a transient render (a compaction
       // spinner, Claude's own internal-retry line) briefly matched a working pattern right
@@ -918,7 +931,13 @@ export async function startMonitor(pane, pid) {
         await logWait((secs, msg) => `Reset time re-read from the live banner: "${msg}". Wait shortened to ${formatDuration(secs)}.`);
       }
       if (result === 'menu-unreadable') await logger.warn('Rate-limit options menu detected but its layout could not be read; not pressing Enter (would risk confirming "Upgrade your plan"). Will recheck.');
-      if (result === 'retried') await logger.info(`Sent retry message (attempt ${state.attempts})`);
+      if (result === 'retried') {
+        await logger.info(`Sent retry message (attempt ${state.attempts})`);
+        if (state._sendingAfterBannerGone) {
+          await logger.info('The limit banner had cleared on its own and the session was idle, so the resume message was sent.');
+          state._sendingAfterBannerGone = false;
+        }
+      }
       if (result === 'user-continued') {
         await logger.info('User already continued. Attempt counter reset.');
         if (state._debugSnippet) {

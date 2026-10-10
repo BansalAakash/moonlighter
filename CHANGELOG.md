@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-10-10
+
+### Fixed
+- **A usage-limit wait that ended with the banner gone sent nothing.** Claude Code now removes its
+  "Usage limit reached · … limit resets 10:50am" banner by itself when the limit resets (and, when a
+  limit hits mid-work, first shows "… · wrapping up ·" while Claude finishes and stops). The monitor
+  read "banner gone" as "the user already continued", so the session sat idle all morning. It now
+  fingerprints the conversation when the wait begins and compares at the end: unchanged and nothing
+  running means the user did not continue, so the resume message is sent; new output means they did.
+  A half-typed draft in the input box does not count as continuing.
+- The packaged DMG build no longer fails intermittently with "No space left on device".
+- Tests: Node 18 compatibility, and isolation from `XDG_CONFIG_HOME` on CI runners.
+
 ## [1.0.0] - 2026-10-10
 
 First packaged release of Moonlighter, a fork of upstream 0.7.3. Not published to npm: it is a Mac app
