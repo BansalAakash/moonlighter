@@ -184,6 +184,11 @@ enum Controller {
         "Monitor shutting down",
         "Claude exited",
         "User already continued",
+        // The passive usage probe logs every ten minutes. It is routine and nothing the person
+        // can act on, and being the most frequent line it would otherwise be the "last event"
+        // almost every time the menu is opened.
+        "Checked /status while idle",
+        "Config file changed",
     ]
 
     /// One line of the log, already split into when and what.

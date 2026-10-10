@@ -75,6 +75,7 @@ Fork of upstream 0.7.3. Installed from source with `./install.sh`; not published
   instead of silently reverting every setting to its default.
 
 ### Fixed
+- The menu's "last event" row no longer shows the routine `Checked /status while idle` line, and the monitor's log prints durations as `3h24m` rather than `12251s`.
 - **A switched-off session could be missing from the menu.** The menu is drawn from the last quick refresh, which skips sessions with no monitor, and the full list arrived after the menu was already open (an open `NSMenu` does not reliably redraw). The app now remembers switched-off sessions between full loads and refreshes the full list every minute and at launch.
 - **The menu bar app listed no sessions** on a machine with tmux 3.7. A GUI app inherits no
   `LANG`, and a tmux client without a UTF-8 locale rewrites tabs and non-ASCII characters in

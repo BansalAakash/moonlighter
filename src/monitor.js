@@ -6,6 +6,7 @@ import { createLogger } from './logger.js';
 import { readStopFailureEvent, clearStopFailureEvent, isRetryableError } from './events.js';
 import { writeStatus, clearStatus, sweepStaleStatus } from './status-file.js';
 import { readSessionPrompt } from './session-prompt.js';
+import { formatDuration } from './status-report.js';
 import { getSessionUsage, invalidateSessionResetCache, appendUsageLog } from './session-reset.js';
 
 const DEFAULT_FOREGROUND_COMMANDS = ['node', 'claude', 'npx', 'tsx', 'bun', 'deno'];
@@ -900,13 +901,13 @@ export async function startMonitor(pane, pid) {
         return logger.info(line(secs, msg));
       };
       if (result === 'waiting' && state.lastRateLimitMessage) {
-        await logWait((secs, msg) => `Rate limit detected: "${msg}". Waiting ${secs}s...`);
+        await logWait((secs, msg) => `Rate limit detected: "${msg}". Waiting ${formatDuration(secs)}...`);
       }
       if (result === 'menu-confirmed') {
-        await logWait((secs) => `Rate-limit options menu: selected "Stop and wait for limit to reset". Waiting ${secs}s...`);
+        await logWait((secs) => `Rate-limit options menu: selected "Stop and wait for limit to reset". Waiting ${formatDuration(secs)}...`);
       }
       if (result === 'wait-corrected') {
-        await logWait((secs, msg) => `Reset time re-read from the live banner: "${msg}". Wait shortened to ${secs}s.`);
+        await logWait((secs, msg) => `Reset time re-read from the live banner: "${msg}". Wait shortened to ${formatDuration(secs)}.`);
       }
       if (result === 'menu-unreadable') await logger.warn('Rate-limit options menu detected but its layout could not be read; not pressing Enter (would risk confirming "Upgrade your plan"). Will recheck.');
       if (result === 'retried') await logger.info(`Sent retry message (attempt ${state.attempts})`);
@@ -920,7 +921,7 @@ export async function startMonitor(pane, pid) {
       if (result === 'session-reset-learned') {
         const secs = Math.round((state.sessionResetAt - Date.now()) / 1000);
         const pct = state.sessionUsedPercent != null ? `${state.sessionUsedPercent}% used, ` : '';
-        await logger.info(`Checked /status while idle — ${pct}session resets in ${secs}s.`);
+        await logger.info(`Checked /status while idle — ${pct}session resets in ${formatDuration(secs)}.`);
         if (state._lastUsage) await appendUsageLog(state._lastUsage).catch(() => {});
       }
       if (result === 'draft-held') {
@@ -942,11 +943,11 @@ export async function startMonitor(pane, pid) {
         const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
         const m = state._overloadMatch;
         const why = m ? ` [matched /${m.pattern}/ in: "${m.line}"]` : '';
-        await logger.warn(`Overload/transient API error detected (sustained)${why}. Backing off ${secs}s before retry. NOTE: Claude Code retries 5xx/529 internally — this only fires on terminal overload.`);
+        await logger.warn(`Overload/transient API error detected (sustained)${why}. Backing off ${formatDuration(secs)} before retry. NOTE: Claude Code retries 5xx/529 internally — this only fires on terminal overload.`);
       }
       if (result === 'overload-retried') {
         const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
-        await logger.info(`Overload retry sent (attempt ${state.overloadAttempts}). Next backoff ${secs}s. Cumulative wait ${Math.round(state.overloadTotalWaitMs / 1000)}s.`);
+        await logger.info(`Overload retry sent (attempt ${state.overloadAttempts}). Next backoff ${formatDuration(secs)}. Cumulative wait ${formatDuration(state.overloadTotalWaitMs / 1000)}.`);
       }
       if (result === 'overload-working') await logger.info('Overload text present but Claude is working (internal retry/streaming). Deferring — not terminal.');
       if (result === 'overload-cleared') await logger.info('Overload cleared. Resuming normal monitoring.');
