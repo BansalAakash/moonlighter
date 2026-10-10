@@ -21,6 +21,14 @@ const RATE_LIMIT_TAIL_LINES = 12;
 // genuinely-failing turn open for several minutes before the hook fires).
 const OVERLOAD_INCIDENT_GAP_MS = 15 * 60_000;
 
+// tmux reports a vanished pane/session/server with these. Closing a session ends its pane while
+// its monitor is mid-tick, so the monitor's next tmux call fails — that is the session ending,
+// not a fault, and used to be logged as an ERROR (and shown in the menu as the last event).
+export function isPaneGoneError(err) {
+  const text = `${err && err.message || ''}\n${err && err.stderr || ''}`;
+  return /can't find (pane|session|window)|no server running|server exited unexpectedly|error connecting to/i.test(text);
+}
+
 export function createMonitorState() {
   return {
     status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null,
@@ -974,6 +982,11 @@ export async function startMonitor(pane, pid) {
       if (result === 'context-clear-only') await logger.warn(`Context limit reached but compaction is disabled (the row offers only /clear): "${state._contextMatch}". Not clearing — that would discard the conversation. Run /compact yourself, or unset DISABLE_COMPACT.`);
       if (result === 'context-gave-up') await logger.warn(`Context-limit row survived ${config.contextLimit.maxRetries} compaction attempt(s). Giving up — check the pane for a "compact failed" line (a PreCompact hook, or a single exchange too large to summarise). Will not retry until it clears.`);
     } catch (err) {
+      if (isPaneGoneError(err)) {
+        await clearStatus(pane).catch(() => {});
+        await logger.info('Pane is gone. Monitor shutting down.');
+        process.exit(0);
+      }
       consecutiveErrors++;
       await logger.error(`Monitor tick error: ${err.message}`).catch(() => {});
       if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {

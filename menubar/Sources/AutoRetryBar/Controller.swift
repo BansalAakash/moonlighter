@@ -189,6 +189,10 @@ enum Controller {
         // almost every time the menu is opened.
         "Checked /status while idle",
         "Config file changed",
+        "Pane is gone",
+        // A monitor whose session was closed under it, from before monitors learned to exit
+        // quietly on that. Bookkeeping about a session that no longer exists.
+        "Monitor tick error: Command failed: tmux",
     ]
 
     /// One line of the log, already split into when and what.

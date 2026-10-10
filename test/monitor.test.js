@@ -692,3 +692,17 @@ describe('weekly limit (dated reset)', () => {
     assert.equal(t._sent.length, 0);
   });
 });
+
+describe('isPaneGoneError', () => {
+  it("recognises tmux's vanished pane/session/server errors", async () => {
+    const { isPaneGoneError } = await import('../src/monitor.js');
+    assert.equal(isPaneGoneError(new Error("Command failed: tmux capture-pane -t %424\ncan't find pane: %424")), true);
+    assert.equal(isPaneGoneError({ message: 'Command failed', stderr: "can't find session: foo" }), true);
+    assert.equal(isPaneGoneError(new Error('no server running on /tmp/tmux-501/default')), true);
+  });
+  it('does not swallow other errors', async () => {
+    const { isPaneGoneError } = await import('../src/monitor.js');
+    assert.equal(isPaneGoneError(new Error('EACCES: permission denied')), false);
+    assert.equal(isPaneGoneError(null), false);
+  });
+});
