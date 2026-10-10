@@ -27,15 +27,13 @@ reasons unrelated to the monitor. The pid is needed to *act* on a monitor, not t
 
 ## What it can do
 
-The menu is a handful of lines. Anything that would always be switched on is not a choice:
+The menu is a handful of lines, and deliberately shows no log: the app is meant to run on its own, and an event nobody can act on is noise. The one thing that does stand out is a session marked `stuck — needs you` (red). Anything that would always be switched on is not a choice:
 
 ```
 ✓ Custom printer utility application — resumes in 3h12m   ▸   ← one line per session;
 ✓ Claude-auto-retry review                                 ▸     its controls are the submenu
   Scratch experiment — won't resume automatically          ▸
 ───────────────────────────────
-7h ago  ·  Sent retry message (attempt 1)   ← last thing that happened to your work;
-                                              "Open Log…" on a quiet day
 Edit Shared Prompt…                         ← hold ⌥ to swap this for "Fix Monitoring"
 ───────────────────────────────
 ✓ Open at Login

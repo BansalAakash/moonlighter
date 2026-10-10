@@ -67,7 +67,6 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-icon") {
 if CommandLine.arguments.contains("--dump") {
     let sessions = Snapshot.loadFull()
     print("status dir : \(Snapshot.statusDir.path)")
-    print("today's log: \(Controller.todayLog.path)")
     print("tmux       : \(Tmux.binary ?? "NOT FOUND")")
     print("timer      : \(Controller.timerInstalled ? "installed" : "not installed")")
     print("login item : \(Controller.launchAtLoginDescription)")
@@ -88,7 +87,6 @@ if CommandLine.arguments.contains("--dump") {
             prompt   : \(SessionPrompt.file(for: s)?.path ?? "-")\(SessionPrompt.isCustom(for: s) ? "  [CUSTOM]" : "")
         """)
     }
-    print("\nlast event: \(Controller.lastEvent().map { "\($0.age)  ·  \($0.message)" } ?? "(nothing recent)")")
     exit(0)
 }
 

@@ -144,7 +144,7 @@ The per-session percentage shows up in the menu ("34% used · resets in 4h29m");
 5-hour and weekly figures are appended to `~/.claude-auto-retry/usage_log.txt` on every
 fresh check, one line per check, if you want a plain-text history of them.
 
-Clicking it gives you the whole app in about six lines:
+Clicking it gives you the whole app in a few lines (there is no log in the menu — it is meant to run on its own; `claude-auto-retry logs` has the history if you ever want it):
 
 ```
 ✓ Custom printer utility application — running
@@ -152,7 +152,6 @@ Clicking it gives you the whole app in about six lines:
 ✓ Claude-auto-retry review — waiting 2h11m
       Custom prompt
   ─────────────────────────────
-  2h ago  ·  Sent retry message (attempt 1)
   Edit Shared Prompt…
   ─────────────────────────────
 ✓ Open at Login
@@ -162,8 +161,6 @@ Clicking it gives you the whole app in about six lines:
 - **Each session is named by what it's working on**, not by process id.
 - **The checkmark is the only per-session setting**: should this one be resumed
   automatically after a limit resets? Click to toggle.
-- **The log line answers "did it fire while I was asleep?"** Click it to open the full
-  log. On a quiet day it just reads `Open Log…`.
 - Hold **Option** to reveal *Fix Monitoring*, which restarts every monitor.
 
 More detail in [`menubar/README.md`](menubar/README.md).

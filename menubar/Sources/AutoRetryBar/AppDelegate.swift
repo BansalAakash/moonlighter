@@ -166,7 +166,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuDidClose(_ menu: NSMenu) { isMenuOpen = false }
 
     /// The whole menu: one plain-language line per session (its controls tucked in a submenu,
-    /// see sessionSubmenu), what happened last, and two app settings. The reconcile timer is
+    /// see sessionSubmenu) and two app settings. There is deliberately no log line: the app is
+    /// meant to run unattended, and an event nobody can act on is just noise. The reconcile timer is
     /// deliberately absent — it is plumbing, not a preference — and the repair action lives
     /// behind the Option key rather than in front of someone who only wants to know whether
     /// their work is still moving.
@@ -189,20 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        // 2. The last thing that happened to your work — the answer to "did it fire while I
-        //    was asleep?", which the session rows cannot give because they only show NOW.
-        //    It is also the way into the log, so there is no separate "Open Log" item: on a
-        //    quiet day this line degrades to exactly that button rather than disappearing and
-        //    leaving the menu a different shape each time you open it.
-        let event = Controller.lastEvent()
-        let log = NSMenuItem(title: event.map { Self.tidy("\($0.age)  ·  \($0.message)") } ?? "Open Log…",
-                             action: #selector(openLog), keyEquivalent: "")
-        log.target = self
-        log.toolTip = event == nil ? "Nothing has happened yet today. Click to open the log."
-                                   : "The last thing the monitor did. Click to open the full log."
-        menu.addItem(log)
-
-        // 3. The one real setting.
+        // 2. The one real setting.
         add(menu, "Edit Shared Prompt…", #selector(openConfig),
             tooltip: "Sent when a session resumes, unless that session has its own "
                    + "(~/.claude-auto-retry.json). Edits reach running sessions within a few seconds.")
@@ -333,7 +321,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openConfig() { Controller.openConfig() }
-    @objc private func openLog() { Controller.open(Controller.todayLog) }
     @objc private func quit() { NSApp.terminate(nil) }
 
     // MARK: - Helpers

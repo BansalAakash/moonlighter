@@ -241,7 +241,6 @@ enum ExcludeList {
 enum Snapshot {
     static let home = FileManager.default.homeDirectoryForCurrentUser
     static var statusDir: URL { home.appending(path: ".claude-auto-retry/status") }
-    static var logsDir: URL { home.appending(path: ".claude-auto-retry/logs") }
     static var configFile: URL { home.appending(path: ".claude-auto-retry.json") }
     static var heartbeatFile: URL { home.appending(path: ".claude-auto-retry/menubar-heartbeat") }
 
