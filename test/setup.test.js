@@ -1,7 +1,8 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, writeFile, mkdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import {
   appBundleRoot, bundledNodePath, pathWithHomebrew, renderReconcilePlist, renderWatchdogPlist,
@@ -37,7 +38,7 @@ describe('plist renderers', () => {
     assert.equal(renderWatchdogPlist('<s>__SCRIPT_PATH__</s><s>__APP_PATH__</s>', '/s h', '/Apps/My & App.app'), '<s>/s h</s><s>/Apps/My &amp; App.app</s>');
   });
   it('the shipped plist templates carry the placeholders', async () => {
-    const root = join(import.meta.dirname, '..', 'launchd');
+    const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'launchd');
     assert.match(await readFile(join(root, 'com.moonlighter.watchdog.plist'), 'utf-8'), /__SCRIPT_PATH__[\s\S]*__APP_PATH__/);
     assert.match(await readFile(join(root, 'com.claude-auto-retry.reconcile.plist'), 'utf-8'), /__NODE_PATH__[\s\S]*__CLI_PATH__/);
   });
@@ -71,11 +72,14 @@ describe('runSetup (sandboxed HOME, launchd skipped)', () => {
   let home; let saved;
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), 'car-setup-'));
-    saved = { HOME: process.env.HOME, SHELL: process.env.SHELL };
+    saved = { HOME: process.env.HOME, SHELL: process.env.SHELL, XDG: process.env.XDG_CONFIG_HOME };
     process.env.HOME = home; process.env.SHELL = '/bin/zsh';
+    // CI runners set this, which would send the fish function outside the sandboxed home.
+    delete process.env.XDG_CONFIG_HOME;
   });
   afterEach(async () => {
     process.env.HOME = saved.HOME; process.env.SHELL = saved.SHELL;
+    if (saved.XDG === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = saved.XDG;
     await rm(home, { recursive: true, force: true });
   });
   const APP = '/Applications/Moonlighter.app';
