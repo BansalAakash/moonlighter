@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-10-22
+
+### Changed
+- **Usage figures come from `claude -p /usage`**, a headless call that makes no model request, instead of
+  opening an interactive Claude in a scratch tmux session. It takes about 3 seconds and leaves nothing to
+  clean up. The scratch session remains as a fallback if the headless read fails.
+- The headless call only runs a `claude` binary owned by you or root and not writable by anyone else, in an
+  empty directory, with a minimal environment (no API keys or agent sockets), hooks and MCP servers off,
+  transcript saving off, and a 30-second deadline. Set `claudePath` in the config to pin the binary.
+- The one-line installer now verifies the download: the release's SHA-256 is written into `install.sh`
+  when it is published, and the install stops on a mismatch.
+
+### Added
+- The menu bar shows `wk NN%` beside the 5-hour countdown once the weekly limit passes 90%.
+- `npm run canary`: an opt-in check against the real Claude Code on your machine that its `/usage` output
+  is still readable.
+
 ## [1.0.3] - 2026-10-10
 
 ### Fixed

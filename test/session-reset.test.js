@@ -53,6 +53,7 @@ const USAGE_PANEL_WITH_WEEKLY = [
   '─'.repeat(40),
 ].join('\n');
 
+const NO_HEADLESS = async () => null;
 const cacheFile = () => join(tmpdir(), `car-session-reset-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
 
 describe('probeViaScratchSession', () => {
@@ -143,7 +144,7 @@ describe('getSessionUsage / invalidateSessionResetCache', () => {
   it('probes on first call, caches the result, and reports fresh: true', async () => {
     const file = cacheFile(); files.push(file);
     const t = mockScratchTmux(USAGE_PANEL);
-    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.ok(usage.resetAt > Date.now());
     assert.equal(usage.percentUsed, 34);
     assert.equal(usage.fresh, true);
@@ -157,7 +158,7 @@ describe('getSessionUsage / invalidateSessionResetCache', () => {
   it('caches and returns the weekly figures alongside the session ones', async () => {
     const file = cacheFile(); files.push(file);
     const t = mockScratchTmux(USAGE_PANEL_WITH_WEEKLY);
-    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.equal(usage.weeklyPercentUsed, 58);
     assert.equal(usage.weeklyResetText, 'Resets Sep 19 at 6:30am (UTC)');
 
@@ -170,8 +171,8 @@ describe('getSessionUsage / invalidateSessionResetCache', () => {
     const file = cacheFile(); files.push(file);
     const t = mockScratchTmux(USAGE_PANEL);
     const config = { ...DEFAULT_CONFIG, sessionResetCheck: { enabled: true, intervalMinutes: 10 } };
-    const first = await getSessionUsage(t, config, file);
-    const second = await getSessionUsage(t, config, file);
+    const first = await getSessionUsage(t, config, file, NO_HEADLESS);
+    const second = await getSessionUsage(t, config, file, NO_HEADLESS);
     assert.equal(second.resetAt, first.resetAt);
     assert.equal(second.percentUsed, first.percentUsed);
     assert.equal(second.fresh, false);
@@ -181,14 +182,14 @@ describe('getSessionUsage / invalidateSessionResetCache', () => {
   it('falls back to the last good cached values when a fresh probe fails entirely', async () => {
     const file = cacheFile(); files.push(file);
     const good = mockScratchTmux(USAGE_PANEL);
-    const first = await getSessionUsage(good, DEFAULT_CONFIG, file);
+    const first = await getSessionUsage(good, DEFAULT_CONFIG, file, NO_HEADLESS);
 
     await invalidateSessionResetCache(file); // force the next call to actually probe again
     // Boots fine (has an empty prompt row) but the Usage tab never has a parseable line —
     // a stale cache falling back to the timeout-slow "never boots" path would make this
     // test needlessly slow without testing anything the boot-timeout test doesn't already.
     const failing = mockScratchTmux('❯ ');
-    const second = await getSessionUsage(failing, DEFAULT_CONFIG, file);
+    const second = await getSessionUsage(failing, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.equal(second.resetAt, first.resetAt, 'a failed probe should not blank out a previously-known reset time');
     assert.equal(second.percentUsed, first.percentUsed);
   });
@@ -196,11 +197,11 @@ describe('getSessionUsage / invalidateSessionResetCache', () => {
   it('a probe that finds the reset time but not the gauge reports percentUsed: null, not the stale figure', async () => {
     const file = cacheFile(); files.push(file);
     const good = mockScratchTmux(USAGE_PANEL);
-    await getSessionUsage(good, DEFAULT_CONFIG, file);
+    await getSessionUsage(good, DEFAULT_CONFIG, file, NO_HEADLESS);
 
     await invalidateSessionResetCache(file);
     const noGauge = mockScratchTmux(['Current session', 'Resets 9pm (UTC)', '❯ '].join('\n'));
-    const second = await getSessionUsage(noGauge, DEFAULT_CONFIG, file);
+    const second = await getSessionUsage(noGauge, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.equal(second.percentUsed, null, 'a partial success should not reuse a possibly-drifted stale percentage');
   });
 
@@ -210,7 +211,7 @@ describe('getSessionUsage / invalidateSessionResetCache', () => {
     // that (as far as this one knows) simply hasn't finished.
     await writeFile(file, JSON.stringify({ resetAt: 0, percentUsed: null, checkedAt: 0, claimedAt: Date.now() }));
     const t = mockScratchTmux(USAGE_PANEL);
-    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.equal(usage.resetAt, 0);
     assert.equal(usage.fresh, false);
     assert.equal(t._newSessions.length, 0, 'must not start a second probe over a fresh claim');
@@ -223,7 +224,7 @@ describe('getSessionUsage / invalidateSessionResetCache', () => {
     const longAgo = Date.now() - 60_000;
     await writeFile(file, JSON.stringify({ resetAt: 0, percentUsed: null, checkedAt: 0, claimedAt: longAgo }));
     const t = mockScratchTmux(USAGE_PANEL);
-    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    const usage = await getSessionUsage(t, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.ok(usage.resetAt > Date.now(), 'an abandoned claim must not block a retry forever');
     assert.equal(t._newSessions.length, 1);
   });
@@ -231,11 +232,11 @@ describe('getSessionUsage / invalidateSessionResetCache', () => {
   it('invalidateSessionResetCache forces the next call to probe again', async () => {
     const file = cacheFile(); files.push(file);
     const t = mockScratchTmux(USAGE_PANEL);
-    await getSessionUsage(t, DEFAULT_CONFIG, file);
+    await getSessionUsage(t, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.equal(t._newSessions.length, 1);
 
     await invalidateSessionResetCache(file);
-    await getSessionUsage(t, DEFAULT_CONFIG, file);
+    await getSessionUsage(t, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.equal(t._newSessions.length, 2, 'invalidated cache must trigger a second probe');
   });
 });
@@ -291,7 +292,7 @@ describe('probe mutual exclusion', () => {
   it('six monitors ticking at the same instant run exactly ONE probe', async () => {
     const file = cacheFile(); files.push(file);
     const monitors = Array.from({ length: 6 }, () => slowTmux(40));
-    const results = await Promise.all(monitors.map((t) => getSessionUsage(t, DEFAULT_CONFIG, file)));
+    const results = await Promise.all(monitors.map((t) => getSessionUsage(t, DEFAULT_CONFIG, file, NO_HEADLESS)));
     assert.equal(monitors.reduce((n, t) => n + t._newSessions.length, 0), 1, 'one scratch session in total');
     assert.equal(results.filter((r) => r.fresh).length, 1, 'only the prober reports a fresh reading');
     for (const r of results) assert.ok(r.resetAt === 0 || r.resetAt > Date.now());
@@ -300,9 +301,9 @@ describe('probe mutual exclusion', () => {
   it('a monitor that arrives after the probe finished serves the cache instead of probing again', async () => {
     const file = cacheFile(); files.push(file);
     const first = mockScratchTmux(USAGE_PANEL);
-    await getSessionUsage(first, DEFAULT_CONFIG, file);
+    await getSessionUsage(first, DEFAULT_CONFIG, file, NO_HEADLESS);
     const late = mockScratchTmux(USAGE_PANEL);
-    const r = await getSessionUsage(late, DEFAULT_CONFIG, file);
+    const r = await getSessionUsage(late, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.equal(r.fresh, false);
     assert.equal(late._newSessions.length, 0);
   });
@@ -311,17 +312,17 @@ describe('probe mutual exclusion', () => {
     const file = cacheFile(); files.push(file);
     const boom = mockScratchTmux(USAGE_PANEL);
     boom.newSession = async () => { throw new Error('tmux exploded'); };
-    await getSessionUsage(boom, DEFAULT_CONFIG, file);          // probe failure is swallowed
+    await getSessionUsage(boom, DEFAULT_CONFIG, file, NO_HEADLESS);          // probe failure is swallowed
     await invalidateSessionResetCache(file);
     const ok = mockScratchTmux(USAGE_PANEL);
-    assert.equal((await getSessionUsage(ok, DEFAULT_CONFIG, file)).fresh, true, 'the next caller is not locked out');
+    assert.equal((await getSessionUsage(ok, DEFAULT_CONFIG, file, NO_HEADLESS)).fresh, true, 'the next caller is not locked out');
   });
 
   it('defers to a live lock held by another probe', async () => {
     const file = cacheFile(); files.push(file);
     await writeFile(`${file}.lock`, 'someone-else');
     const t = mockScratchTmux(USAGE_PANEL);
-    const r = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    const r = await getSessionUsage(t, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.equal(r.fresh, false);
     assert.equal(t._newSessions.length, 0);
   });
@@ -332,7 +333,7 @@ describe('probe mutual exclusion', () => {
     const old = (Date.now() - 5 * 60_000) / 1000;
     await utimes(`${file}.lock`, old, old);
     const t = mockScratchTmux(USAGE_PANEL);
-    const r = await getSessionUsage(t, DEFAULT_CONFIG, file);
+    const r = await getSessionUsage(t, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.equal(r.fresh, true);
     assert.equal(t._newSessions.length, 1);
   });
@@ -340,7 +341,7 @@ describe('probe mutual exclusion', () => {
   it('a probe that failed outright is not reported as a fresh reading', async () => {
     const file = cacheFile(); files.push(file);
     const failing = mockScratchTmux('❯ ');            // boots, but the Usage tab has no reset line
-    const r = await getSessionUsage(failing, DEFAULT_CONFIG, file);
+    const r = await getSessionUsage(failing, DEFAULT_CONFIG, file, NO_HEADLESS);
     assert.equal(r.fresh, false, 'otherwise the log claims "Checked /status" for a check that read nothing');
   });
 });

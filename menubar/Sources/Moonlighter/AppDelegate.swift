@@ -163,6 +163,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The mark is constant — it is the app's identity, and an icon that morphs is hard to
     /// find again in a crowded menu bar. State rides on the label next to it, plus colour
     /// for the one case that needs to interrupt you.
+    static let weeklyWarnPercent = 90
+
     static func face(for sessions: [Session]) -> (NSImage, String) {
         let live = sessions.filter { $0.isLive }
         let attention = live.filter { $0.health == .attention }
@@ -181,8 +183,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let s = live.filter({ $0.sessionResetDeadline != nil })
             .min(by: { $0.sessionResetDeadline! < $1.sessionResetDeadline! }) {
             let d = s.sessionResetDeadline!
+            // A weekly window at 90%+ outlasts any 5-hour wait (it resets in days), so it is worth
+            // a word in the bar even when the 5-hour figure looks fine.
+            let weekly = (s.status.sessionWeeklyPercent ?? 0) >= Self.weeklyWarnPercent
+                ? " · wk \(s.status.sessionWeeklyPercent!)%" : ""
             if let used = s.status.sessionUsedPercent {
-                return (Icon.normal, "\(max(0, 100 - used))% left · \(Session.short(d))")
+                return (Icon.normal, "\(max(0, 100 - used))% left · \(Session.short(d))\(weekly)")
             }
             return (Icon.normal, Session.short(d))
         }

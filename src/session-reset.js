@@ -22,6 +22,7 @@ import { homedir } from 'node:os';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { findSessionResetLine, findSessionUsagePercent, findWeeklyResetLine, findWeeklyUsagePercent, isInputBoxEmpty } from './patterns.js';
 import { localTimestamp } from './logger.js';
+import { probeViaHeadless } from './usage-probe.js';
 
 // Overridable (see getSessionResetAt/invalidateSessionResetCache's cacheFile param) so
 // tests don't read or write the real, shared, machine-wide cache — mirrors logger.js's
@@ -199,7 +200,7 @@ async function acquireProbeLock(lockFile) {
 // call (as opposed to serving a cache hit, deferring to another monitor's in-flight probe, or
 // a probe that failed outright), so callers can tell "just learned something new" apart from
 // "nothing changed, don't bother logging it".
-export async function getSessionUsage(tmuxAdapter, config, cacheFile = DEFAULT_CACHE_FILE) {
+export async function getSessionUsage(tmuxAdapter, config, cacheFile = DEFAULT_CACHE_FILE, headless = probeViaHeadless) {
   const intervalMs = ((config.sessionResetCheck && config.sessionResetCheck.intervalMinutes) || 10) * 60_000;
   const served = (cache) => ({ ...pickCacheFields(cache), fresh: false });
   const now = Date.now();
@@ -221,7 +222,9 @@ export async function getSessionUsage(tmuxAdapter, config, cacheFile = DEFAULT_C
     const priorCheckedAt = current ? current.checkedAt || 0 : 0;
     const claimedAt = Date.now();
     await writeCache(cacheFile, { ...prior, checkedAt: priorCheckedAt, claimedAt });
-    const result = await probeViaScratchSession(tmuxAdapter, config).catch(() => null);
+    // Headless first (no tmux, no model call); the scratch session only when it yields nothing.
+    const result = (await headless(config, SCRATCH_CWD).catch(() => null))
+      || (await probeViaScratchSession(tmuxAdapter, config).catch(() => null));
     const final = {
       resetAt: (result && result.resetAt) || prior.resetAt,
       // A totally failed probe falls back to the last known figures (better than nothing,

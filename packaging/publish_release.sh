@@ -31,7 +31,10 @@ npm test >/dev/null
 "$HERE/build_mac_app.sh" "$VERSION"
 "$HERE/verify_build.sh"
 
-cp "$HERE/install-release.sh" "$ROOT/dist/install.sh"
+# Bake the zip's SHA-256 into the installer the one-line install runs.
+ZIP_SHA="$(shasum -a 256 "$ROOT/dist/Moonlighter-Apple-Silicon.zip" | cut -d' ' -f1)"
+sed "s/^EXPECTED_SHA256=.*/EXPECTED_SHA256=\"$ZIP_SHA\"/" "$HERE/install-release.sh" > "$ROOT/dist/install.sh"
+grep -q "^EXPECTED_SHA256=\"$ZIP_SHA\"" "$ROOT/dist/install.sh" || { echo "Checksum was not embedded." >&2; exit 1; }
 NOTES="$(mktemp)"
 cat > "$NOTES" <<NOTES_EOF
 ## Install

@@ -12,6 +12,9 @@
 set -euo pipefail
 
 REPO="BansalAakash/moonlighter"
+# Filled in by publish_release.sh with the digest of the zip it uploads, so the script and the
+# archive it fetches cannot drift apart. Left as-is, the download is not checked (source/testing use).
+EXPECTED_SHA256="@ZIP_SHA256@"
 APP="/Applications/Moonlighter.app"
 say()  { printf '\033[1m%s\033[0m\n' "$*"; }
 warn() { printf '\033[33m%s\033[0m\n' "$*"; }
@@ -33,6 +36,16 @@ else
     ZIP="$TMP/Moonlighter.zip"
     curl -fSL --progress-bar "https://github.com/$REPO/releases/latest/download/Moonlighter-Apple-Silicon.zip" -o "$ZIP" \
         || die "Could not download Moonlighter. Check your connection, or get it from https://github.com/$REPO/releases"
+fi
+if [ -n "${MOONLIGHTER_ZIP:-}" ]; then
+    :   # a local zip is the caller's own; nothing to compare it with
+elif [ "$EXPECTED_SHA256" = "@ZIP_SHA256@" ]; then
+    warn "  This copy of the installer carries no checksum; skipping verification."
+else
+    ACTUAL="$(shasum -a 256 "$ZIP" | cut -d' ' -f1)"
+    [ "$ACTUAL" = "$EXPECTED_SHA256" ] \
+        || die "Checksum mismatch: the download is not the release this installer was made for. Nothing was installed."
+    echo "  Checksum verified."
 fi
 ditto -x -k "$ZIP" "$TMP/unpacked"
 [ -d "$TMP/unpacked/Moonlighter.app" ] || die "That download does not contain Moonlighter.app."

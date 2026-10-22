@@ -99,6 +99,20 @@ enum SelfTest {
         fresh.title = "✳ Sticker printer project"
         check("a real conversation title is used as is", fresh.displayName == "Sticker printer project")
 
+        // --- weekly warning in the bar label ---------------------------------------------------------
+        func withUsage(weekly: Int?) -> Session {
+            var s = session("%5", on: true)
+            s.status.sessionResetAt = Int(Date().timeIntervalSince1970) + 3 * 3600
+            s.status.updatedAt = Int(Date().timeIntervalSince1970)
+            s.status.sessionUsedPercent = 40
+            s.status.sessionWeeklyPercent = weekly
+            return s
+        }
+        check("a weekly figure under 90% stays out of the bar",
+              !AppDelegate.face(for: [withUsage(weekly: 70)]).1.contains("wk"), AppDelegate.face(for: [withUsage(weekly: 70)]).1)
+        check("a weekly figure at 90%+ is shown",
+              AppDelegate.face(for: [withUsage(weekly: 92)]).1.contains("wk 92%"), AppDelegate.face(for: [withUsage(weekly: 92)]).1)
+
         // --- Icon -------------------------------------------------------------------------------
         check("the menu bar mark is 16pt and a template", Icon.normal.size == NSSize(width: 16, height: 16) && Icon.normal.isTemplate)
 

@@ -1,6 +1,6 @@
 {
   "name": "claude-auto-retry",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Keep Claude Code working while you're away: auto-resume after usage limits, auto-/compact when the context window fills, and a macOS menu bar app to watch it all.",
   "type": "module",
   "bin": {
@@ -8,7 +8,8 @@
     "claude-auto-retry-tmux-status": "./bin/tmux-status.sh"
   },
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "canary": "MOONLIGHTER_LIVE=1 node --test test/live-canary.test.js"
   },
   "license": "MIT",
   "engines": {

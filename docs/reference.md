@@ -607,7 +607,8 @@ claude-auto-retry/
 │   ├── config.js           # Config loading + validation
 │   ├── logger.js           # File-based logging with rotation (+ the local-date log filename)
 │   ├── status-report.js    # `status`: per-session lines from the monitors' snapshots
-│   ├── session-reset.js    # Passive /status probe (menu bar countdown), with a cross-process lock
+│   ├── session-reset.js    # Passive usage probe (menu bar countdown), with a cross-process lock
+│   ├── usage-probe.js      # Headless `claude -p /usage` read, with binary trust checks
 │   ├── session-prompt.js   # Per-session resume-prompt override
 │   ├── tmux.js             # tmux command wrappers (execFile-based)
 │   ├── monitor.js          # Core monitoring loop + retry logic (usage + overload paths)
