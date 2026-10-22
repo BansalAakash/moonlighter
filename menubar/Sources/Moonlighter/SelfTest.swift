@@ -111,6 +111,13 @@ enum SelfTest {
         check("90% or more is hot", usage(95, 10).isHot && !usage(89, 89).isHot)
         check("with no incident the bar shows usage even when no session is watched",
               AppDelegate.face(for: [], usage: usage(12, 40)).1 == "12%")
+        let r0 = Date().addingTimeInterval(3600), r1 = Date().addingTimeInterval(6 * 3600)
+        func u(_ pct: Int, _ reset: Date) -> Usage { Usage(sessionPercent: pct, sessionResetAt: reset, weeklyPercent: 10, weeklyResetAt: r1, checkedAt: nil) }
+        check("a nearly-used window that rolls over is announced",
+              Usage.resetWindows(old: u(96, r0), new: u(2, r0.addingTimeInterval(5 * 3600))) == ["5-hour"])
+        check("a light window rolling over is not", Usage.resetWindows(old: u(30, r0), new: u(1, r0.addingTimeInterval(5 * 3600))).isEmpty)
+        check("reading-to-reading jitter is not a roll-over", Usage.resetWindows(old: u(96, r0), new: u(97, r0.addingTimeInterval(2))).isEmpty)
+        check("the first reading announces nothing", Usage.resetWindows(old: nil, new: u(96, r0)).isEmpty)
         let parsedUsage = Usage.parse(#"{"resetAt":1792692660000,"percentUsed":7,"weeklyPercentUsed":85,"weeklyResetAt":1792803660000,"checkedAt":1792686751454}"#)
         check("the CLI's JSON parses", parsedUsage?.sessionPercent == 7 && parsedUsage?.weeklyPercent == 85 && parsedUsage?.weeklyResetAt != nil)
 

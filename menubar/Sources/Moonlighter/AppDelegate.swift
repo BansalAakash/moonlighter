@@ -56,7 +56,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard let self else { return }
                 self.usageRefreshing = false
                 self.usageLoading = false
-                if let parsed { self.usage = parsed }
+                if let parsed {
+                    for w in Usage.resetWindows(old: self.usage, new: parsed) {
+                        Controller.banner("Claude \(w) limit reset", "Your \(w) limit is available again.")
+                    }
+                    self.usage = parsed
+                }
                 self.usageCard.usage = self.usage
                 self.usageCard.loading = false
                 self.apply(self.sessions)
@@ -257,35 +262,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(cardItem)
         menu.addItem(.separator())
 
-        // 1. Every Claude session, each a checkbox: ticked = picked back up after a limit resets.
+        // 1. Terminal sessions — only the part of Moonlighter that watches `claude` in tmux. With none
+        // being watched it steps back into a submenu, so the menu is just the usage card.
         rowBoxes = [:]
         rowPanes = sessions.map(\.pane)
         bulkItem = nil
-        if sessions.isEmpty {
-            let empty = NSMenuItem(title: "No Claude sessions running", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            menu.addItem(empty)
-        } else {
+        let anyLive = sessions.contains { $0.isLive }
+        let sessionItems = NSMenu()
+        let sessionTarget = anyLive ? menu : sessionItems
+        if !sessions.isEmpty {
             let width = rowWidth(for: sessions)
             for session in sessions {
-                menu.addItem(sessionItem(session, width: width))
+                sessionTarget.addItem(sessionItem(session, width: width))
             }
             if sessions.count > 1 {
                 let all = NSMenuItem(title: Self.bulkTitle(for: sessions), action: #selector(toggleAll), keyEquivalent: "")
                 all.target = self
                 all.toolTip = "Switch automatic resume on (or off) for every session at once."
-                menu.addItem(all)
+                sessionTarget.addItem(all)
                 bulkItem = all
             }
-            if let prompts = promptsItem() { menu.addItem(prompts) }
+            if let prompts = promptsItem() { sessionTarget.addItem(prompts) }
+            if !anyLive {
+                let parent = NSMenuItem(title: "Terminal Sessions (\(sessions.count)) — not watched", action: nil, keyEquivalent: "")
+                parent.submenu = sessionItems
+                menu.addItem(parent)
+            }
         }
 
-        menu.addItem(.separator())
+        if !sessions.isEmpty {
+            menu.addItem(.separator())
 
-        // 2. The one real setting.
-        add(menu, "Edit Shared Prompt…", #selector(openConfig),
-            tooltip: "Sent when a session resumes, unless that session has its own "
-                   + "(~/.claude-auto-retry.json). Edits reach running sessions within a few seconds.")
+            // 2. The one real setting.
+            add(menu, "Edit Shared Prompt…", #selector(openConfig),
+                tooltip: "Sent when a session resumes, unless that session has its own "
+                       + "(~/.claude-auto-retry.json). Edits reach running sessions within a few seconds.")
+        }
 
         // Repair tools, revealed by holding Option. isAlternate swaps an item for the one
         // above it while the modifier is held, so the default menu stays four lines long.

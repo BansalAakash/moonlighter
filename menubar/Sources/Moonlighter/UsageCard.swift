@@ -46,6 +46,21 @@ struct Usage: Equatable {
         return parts.joined(separator: " · ")
     }
 
+    /// Windows that were nearly used up and have since rolled over — worth telling the user their
+    /// limit is back. A roll-over shows as the reset instant moving later by a real margin (not the
+    /// few seconds of jitter between readings).
+    static func resetWindows(old: Usage?, new: Usage) -> [String] {
+        guard let old else { return [] }
+        var out: [String] = []
+        func rolled(_ pct: Int?, _ a: Date?, _ b: Date?) -> Bool {
+            guard let pct, pct >= hotPercent, let a, let b else { return false }
+            return b.timeIntervalSince(a) > 30 * 60
+        }
+        if rolled(old.sessionPercent, old.sessionResetAt, new.sessionResetAt) { out.append("5-hour") }
+        if rolled(old.weeklyPercent, old.weeklyResetAt, new.weeklyResetAt) { out.append("weekly") }
+        return out
+    }
+
     var isHot: Bool { max(sessionShown ?? 0, weeklyShown ?? 0) >= Self.hotPercent }
 
     static func updatedText(_ at: Date?, now: Date = Date()) -> String {

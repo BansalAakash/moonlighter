@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 import ServiceManagement
 
 /// Everything the menu can DO. Each action is a thin wrapper over the CLI the package already
@@ -236,6 +237,17 @@ enum Controller {
             try? Data((seed + "\n").utf8).write(to: file)
         }
         open(file)
+    }
+
+    /// A banner notification (no modal, no focus steal). Asks for permission the first time.
+    static func banner(_ title: String, _ body: String) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let c = UNMutableNotificationContent()
+            c.title = title; c.body = body; c.sound = .default
+            center.add(UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
+        }
     }
 
     /// Used only where staying silent would be a lie — e.g. macOS parking a login-item
