@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-10-22
+
+### Changed
+- The panel is usage only: the terminal sessions list and the shared-prompt editor are gone from it, and the
+  right-click menu is down to Open at Login and Quit. (Watching terminal sessions still works in the
+  background; it just has no controls here.)
+
 ## [1.4.0] - 2026-10-22
 
 ### Changed

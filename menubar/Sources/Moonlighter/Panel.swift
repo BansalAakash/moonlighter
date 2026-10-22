@@ -7,16 +7,10 @@ final class PanelModel: ObservableObject {
     @Published var usage: Usage?
     @Published var loading = true
     @Published var sessions: [Session] = []
-    @Published var pending: [String: Bool] = [:]       // a toggle just flipped, still being applied
     @Published var launchAtLogin = false
 
-    var onToggle: (Session, Bool) -> Void = { _, _ in }
-    var onToggleAll: () -> Void = {}
     var onRefresh: () -> Void = {}
     var onQuit: () -> Void = {}
-    var onEditSharedPrompt: () -> Void = {}
-    var onEditSessionPrompt: (Session) -> Void = { _ in }
-    var onFixMonitoring: () -> Void = {}
     var onLaunchAtLogin: (Bool) -> Void = { _ in }
 }
 
@@ -106,44 +100,6 @@ struct ClaudeCard: View {
     }
 }
 
-struct SessionsSection: View {
-    @ObservedObject var model: PanelModel
-
-    private var anyLive: Bool { model.sessions.contains { $0.isLive } }
-    private func isOn(_ s: Session) -> Bool { model.pending[s.pane] ?? s.autoResume }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Terminal sessions").font(.system(size: 13, weight: .semibold))
-                Text(anyLive ? "resumed after a limit resets" : "none watched")
-                    .font(.system(size: 12)).foregroundStyle(.tertiary)
-                Spacer()
-                if model.sessions.count > 1 {
-                    Button(AppDelegate.bulkTitle(for: model.sessions).replacingOccurrences(of: " Sessions", with: ""), action: model.onToggleAll)
-                        .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(brand)
-                }
-            }
-            ForEach(model.sessions, id: \.pane) { s in
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(s.displayName).font(.system(size: 13)).lineLimit(1)
-                        if !s.headline.isEmpty {
-                            Text(s.headline).font(.system(size: 11))
-                                .foregroundStyle(s.health == .attention ? Color.red : Color.secondary).lineLimit(1)
-                        }
-                    }
-                    Spacer(minLength: 8)
-                    Toggle("", isOn: Binding(get: { isOn(s) }, set: { model.onToggle(s, $0) }))
-                        .toggleStyle(.switch).controlSize(.mini).labelsHidden()
-                        .tint(brand)
-                }
-            }
-        }
-        .padding(.horizontal, 20).padding(.vertical, 14)
-    }
-}
-
 struct Footer: View {
     @ObservedObject var model: PanelModel
 
@@ -155,14 +111,6 @@ struct Footer: View {
             Toggle("Launch at Login", isOn: Binding(get: { model.launchAtLogin }, set: { model.onLaunchAtLogin($0) }))
                 .toggleStyle(.switch).controlSize(.mini).tint(brand).lineLimit(1).fixedSize()
             Spacer()
-            Menu {
-                Button("Edit Shared Prompt…", action: model.onEditSharedPrompt)
-                ForEach(model.sessions.filter { $0.claudePid != nil }, id: \.pane) { s in
-                    Button("Prompt for \(s.displayName)…") { model.onEditSessionPrompt(s) }
-                }
-                Button("Fix Monitoring", action: model.onFixMonitoring)
-            } label: { Image(systemName: "ellipsis.circle") }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             Button("Quit", action: model.onQuit).buttonStyle(.plain).lineLimit(1).fixedSize()
         }
         .font(.system(size: 13))
@@ -177,10 +125,6 @@ struct PanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             ClaudeCard(model: model)
-            if !model.sessions.isEmpty {
-                Divider()
-                SessionsSection(model: model)
-            }
             Divider()
             Footer(model: model)
         }

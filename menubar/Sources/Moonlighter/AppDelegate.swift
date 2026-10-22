@@ -78,13 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Panel
 
     private func setUpPanel() {
-        model.onToggle = { [weak self] s, on in self?.setAutoResume(s, on) }
-        model.onToggleAll = { [weak self] in self?.toggleAll() }
         model.onRefresh = { [weak self] in self?.refresh(full: true); self?.refreshUsage(maxAge: 1) }
         model.onQuit = { NSApp.terminate(nil) }
-        model.onEditSharedPrompt = { Controller.openConfig() }
-        model.onEditSessionPrompt = { Controller.openSessionPrompt($0) }
-        model.onFixMonitoring = { [weak self] in self?.restartAll() }
         model.onLaunchAtLogin = { [weak self] on in
             if let problem = Controller.setLaunchAtLogin(on) { Controller.notify("Open at Login", problem) }
             self?.model.launchAtLogin = Controller.launchAtLoginEnabled
@@ -216,7 +211,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func apply(_ loaded: [Session]) {
         sessions = loaded
         model.sessions = loaded
-        for (pane, _) in model.pending where !pendingToggles.contains(pane) { model.pending[pane] = nil }
         guard let button = statusItem?.button else { return }
 
         let (image, label) = Self.face(for: sessions, usage: usage)
@@ -302,54 +296,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(warn)
             menu.addItem(.separator())
         }
-
-        // 1. Terminal sessions — only the part of Moonlighter that watches `claude` in tmux. With none
-        // being watched it steps back into a submenu, so the menu is just the usage card.
-        rowBoxes = [:]
-        rowPanes = sessions.map(\.pane)
-        bulkItem = nil
-        let anyLive = sessions.contains { $0.isLive }
-        let sessionItems = NSMenu()
-        let sessionTarget = anyLive ? menu : sessionItems
-        if !sessions.isEmpty {
-            let width = rowWidth(for: sessions)
-            for session in sessions {
-                sessionTarget.addItem(sessionItem(session, width: width))
-            }
-            if sessions.count > 1 {
-                let all = NSMenuItem(title: Self.bulkTitle(for: sessions), action: #selector(toggleAll), keyEquivalent: "")
-                all.target = self
-                all.toolTip = "Switch automatic resume on (or off) for every session at once."
-                sessionTarget.addItem(all)
-                bulkItem = all
-            }
-            if let prompts = promptsItem() { sessionTarget.addItem(prompts) }
-            if !anyLive {
-                let parent = NSMenuItem(title: "Terminal Sessions (\(sessions.count)) — not watched", action: nil, keyEquivalent: "")
-                parent.submenu = sessionItems
-                menu.addItem(parent)
-            }
-        }
-
-        if !sessions.isEmpty {
-            menu.addItem(.separator())
-
-            // 2. The one real setting.
-            add(menu, "Edit Shared Prompt…", #selector(openConfig),
-                tooltip: "Sent when a session resumes, unless that session has its own "
-                       + "(~/.claude-auto-retry.json). Edits reach running sessions within a few seconds.")
-        }
-
-        // Repair tools, revealed by holding Option. isAlternate swaps an item for the one
-        // above it while the modifier is held, so the default menu stays four lines long.
-        let fix = NSMenuItem(title: "Fix Monitoring", action: #selector(restartAll), keyEquivalent: "")
-        fix.target = self
-        fix.isAlternate = true
-        fix.keyEquivalentModifierMask = .option
-        fix.toolTip = "Restart every monitor. Also how a change to the package's code takes effect."
-        menu.addItem(fix)
-
-        menu.addItem(.separator())
 
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         login.target = self
@@ -499,7 +445,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setAutoResume(_ s: Session, _ on: Bool) {
         pendingToggles.insert(s.pane)
-        model.pending[s.pane] = on
         // Both directions shell out (exclude-self, or reconcile after the file edit), which is
         // slow enough to freeze the menu bar if done inline. The menu stays open throughout.
         DispatchQueue.global(qos: .userInitiated).async {
