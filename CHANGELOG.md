@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-10-22
+
+### Added
+- **A usage card at the top of the menu:** Claude's 5-hour and weekly windows as bars with the percentage, the
+  reset time and how fresh the reading is; the bar turns red at 90%.
+- **The menu bar shows your usage** (`7%`, or `7% · 85%ʷ` once the week passes half) all the time, instead of
+  only while a watched session has a countdown. The app refreshes it itself, so it works with no session
+  being watched.
+- `claude-auto-retry usage [--max-age <seconds>]` prints the shared usage reading as JSON, refreshing it first
+  when it is older than max-age.
+
+### Changed
+- The `wk NN%` text from 1.1.0 is replaced by the weekly figure above.
+
 ## [1.1.0] - 2026-10-22
 
 ### Changed

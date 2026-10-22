@@ -17,6 +17,8 @@ import {
 import {
   runSetup, runUninstallAll, appBundleRoot, bundledNodePath, renderReconcilePlist,
 } from '../src/setup.js';
+import { getSessionUsage, DEFAULT_CACHE_FILE } from '../src/session-reset.js';
+import { loadConfig } from '../src/config.js';
 import { reconcile, excludeSelf, parseRunningMonitors, PGREP_LIST_FLAG } from '../src/reconcile.js';
 
 export { renderReconcilePlist };
@@ -445,6 +447,20 @@ async function cmdReconcile() {
   if (armed.length === 0) console.log('All live claude sessions already monitored.');
 }
 
+// `usage [--max-age <seconds>]`: refreshes the shared usage cache through the headless probe when it
+// is older than max-age (default 120), then prints the cache as JSON. This is how the menu bar app
+// shows usage even when no session is being watched.
+async function cmdUsage() {
+  const i = process.argv.indexOf('--max-age');
+  const maxAge = i > -1 ? Number(process.argv[i + 1]) : 120;
+  const config = await loadConfig();
+  const cfg = { ...config, sessionResetCheck: { ...config.sessionResetCheck, intervalMinutes: Math.max(Number.isFinite(maxAge) ? maxAge : 120, 1) / 60 } };
+  const usage = await getSessionUsage(null, cfg, DEFAULT_CACHE_FILE, undefined, { scratchFallback: false });
+  let checkedAt = 0;
+  try { checkedAt = JSON.parse(await readFile(DEFAULT_CACHE_FILE, 'utf-8')).checkedAt || 0; } catch { /* none yet */ }
+  console.log(JSON.stringify({ ...usage, checkedAt }));
+}
+
 async function cmdVersion() {
   try {
     const pkg = JSON.parse(await readFile(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -469,6 +485,7 @@ switch (command) {
   case 'install-timer': await cmdInstallTimer(); break;
   case 'uninstall-timer': await cmdUninstallTimer(); break;
   case 'status': await cmdStatus(); break;
+  case 'usage': await cmdUsage(); break;
   case 'logs': await cmdLogs(); break;
   case 'version': case '--version': case '-v': await cmdVersion(); break;
   default:

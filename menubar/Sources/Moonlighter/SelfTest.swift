@@ -99,19 +99,20 @@ enum SelfTest {
         fresh.title = "✳ Sticker printer project"
         check("a real conversation title is used as is", fresh.displayName == "Sticker printer project")
 
-        // --- weekly warning in the bar label ---------------------------------------------------------
-        func withUsage(weekly: Int?) -> Session {
-            var s = session("%5", on: true)
-            s.status.sessionResetAt = Int(Date().timeIntervalSince1970) + 3 * 3600
-            s.status.updatedAt = Int(Date().timeIntervalSince1970)
-            s.status.sessionUsedPercent = 40
-            s.status.sessionWeeklyPercent = weekly
-            return s
+        // --- usage in the bar -------------------------------------------------------------------------
+        let soon = Date().addingTimeInterval(3 * 3600)
+        func usage(_ s: Int?, _ w: Int?) -> Usage {
+            Usage(sessionPercent: s, sessionResetAt: soon, weeklyPercent: w, weeklyResetAt: soon, checkedAt: Date())
         }
-        check("a weekly figure under 90% stays out of the bar",
-              !AppDelegate.face(for: [withUsage(weekly: 70)]).1.contains("wk"), AppDelegate.face(for: [withUsage(weekly: 70)]).1)
-        check("a weekly figure at 90%+ is shown",
-              AppDelegate.face(for: [withUsage(weekly: 92)]).1.contains("wk 92%"), AppDelegate.face(for: [withUsage(weekly: 92)]).1)
+        check("the bar shows the 5-hour figure alone while the week is light", usage(7, 30).barLabel == "7%", usage(7, 30).barLabel)
+        check("...and adds the weekly figure once it passes half", usage(7, 85).barLabel == "7% · 85%ʷ", usage(7, 85).barLabel)
+        check("a window past its reset reads as unknown, not as the old figure",
+              Usage(sessionPercent: 90, sessionResetAt: Date().addingTimeInterval(-60), weeklyPercent: nil, weeklyResetAt: nil, checkedAt: nil).isEmpty)
+        check("90% or more is hot", usage(95, 10).isHot && !usage(89, 89).isHot)
+        check("with no incident the bar shows usage even when no session is watched",
+              AppDelegate.face(for: [], usage: usage(12, 40)).1 == "12%")
+        let parsedUsage = Usage.parse(#"{"resetAt":1792692660000,"percentUsed":7,"weeklyPercentUsed":85,"weeklyResetAt":1792803660000,"checkedAt":1792686751454}"#)
+        check("the CLI's JSON parses", parsedUsage?.sessionPercent == 7 && parsedUsage?.weeklyPercent == 85 && parsedUsage?.weeklyResetAt != nil)
 
         // --- Icon -------------------------------------------------------------------------------
         check("the menu bar mark is 16pt and a template", Icon.normal.size == NSSize(width: 16, height: 16) && Icon.normal.isTemplate)

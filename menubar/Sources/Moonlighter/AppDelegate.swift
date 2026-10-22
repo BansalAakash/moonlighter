@@ -15,6 +15,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Menu items are rebuilt on open, but the TITLE has to stay honest while the menu is
     /// closed — a "waiting 3h12m" that froze an hour ago is worse than no countdown at all.
     private var isMenuOpen = false
+    /// Account-wide usage for the card and the bar. Refreshed by the app itself (not by a watched
+    /// session's monitor), so it is there even when nothing is being watched.
+    private var usage: Usage?
+    private var usageLoading = true
+    private var usageRefreshing = false
+    private let usageCard = UsageCardView()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -33,7 +39,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             tick += 1
             self?.refresh(full: tick % 12 == 0)
         }
+        refreshUsage()
+        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.refreshUsage() }
         ensureAlwaysOnPieces()
+    }
+
+    /// Reads the shared cache, asking the CLI for a fresh reading when it is older than `maxAge`
+    /// (a headless `claude -p /usage`, about three seconds, no model call). Off the main thread.
+    private func refreshUsage(maxAge: Int = 300) {
+        if usageRefreshing { return }
+        usageRefreshing = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let r = Controller.cli(["usage", "--max-age", "\(maxAge)"], timeout: 45)
+            let parsed = r.status == 0 ? Usage.parse(r.out.split(separator: "\n").last.map(String.init) ?? "") : nil
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.usageRefreshing = false
+                self.usageLoading = false
+                if let parsed { self.usage = parsed }
+                self.usageCard.usage = self.usage
+                self.usageCard.loading = false
+                self.apply(self.sessions)
+            }
+        }
     }
 
     private static let didFirstRunSetupKey = "didFirstRunSetup"
@@ -137,11 +165,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sessions = loaded
         guard let button = statusItem?.button else { return }
 
-        let (image, label) = Self.face(for: sessions)
+        let (image, label) = Self.face(for: sessions, usage: usage)
 
         button.image = image
         button.imagePosition = label.isEmpty ? .imageOnly : .imageLeading
-        button.title = label.isEmpty ? "" : " \(label)"
+        let hot = (usage?.isHot ?? false) && sessions.allSatisfy { $0.health != .attention }
+        button.attributedTitle = label.isEmpty ? NSAttributedString(string: "") : NSAttributedString(
+            string: " \(label)", attributes: [.foregroundColor: hot ? NSColor.systemRed : NSColor.controlTextColor,
+                                              .font: NSFont.menuBarFont(ofSize: 0)])
 
         if isMenuOpen, let menu = statusItem?.menu { refreshOpenMenu(menu) }
     }
@@ -163,9 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The mark is constant — it is the app's identity, and an icon that morphs is hard to
     /// find again in a crowded menu bar. State rides on the label next to it, plus colour
     /// for the one case that needs to interrupt you.
-    static let weeklyWarnPercent = 90
-
-    static func face(for sessions: [Session]) -> (NSImage, String) {
+    static func face(for sessions: [Session], usage: Usage? = nil) -> (NSImage, String) {
         let live = sessions.filter { $0.isLive }
         let attention = live.filter { $0.health == .attention }
         let waiting = live.filter { $0.health == .waiting }
@@ -177,20 +206,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let soonest = waiting.compactMap({ $0.deadline }).min() {
             return (Icon.normal, Session.short(soonest))                     // "3h12m"
         }
-        // No active incident, but the passively-learned account-wide usage is available (see
-        // sessionResetDeadline). Shown once here, not per session, so it never disappears just
-        // because nothing is wrong.
-        if let s = live.filter({ $0.sessionResetDeadline != nil })
-            .min(by: { $0.sessionResetDeadline! < $1.sessionResetDeadline! }) {
-            let d = s.sessionResetDeadline!
-            // A weekly window at 90%+ outlasts any 5-hour wait (it resets in days), so it is worth
-            // a word in the bar even when the 5-hour figure looks fine.
-            let weekly = (s.status.sessionWeeklyPercent ?? 0) >= Self.weeklyWarnPercent
-                ? " · wk \(s.status.sessionWeeklyPercent!)%" : ""
-            if let used = s.status.sessionUsedPercent {
-                return (Icon.normal, "\(max(0, 100 - used))% left · \(Session.short(d))\(weekly)")
-            }
-            return (Icon.normal, Session.short(d))
+        // Nothing wrong: show how much of the limit is used (and the weekly figure once it
+        // matters), whether or not any session is being watched.
+        if let u = usage, !u.isEmpty {
+            return (live.isEmpty ? Icon.dimmed : Icon.normal, u.barLabel)
         }
         if !live.isEmpty { return (Icon.normal, live.count > 1 ? "\(live.count)" : "") }
         // Nothing being watched — whether that is "no sessions" or "monitors died" is a
@@ -203,6 +222,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         isMenuOpen = true
         refresh(full: true)
+        usageCard.usage = usage
+        usageCard.loading = usageLoading
+        refreshUsage(maxAge: 90)
         rebuild(menu)
     }
 
@@ -228,6 +250,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(warn)
             menu.addItem(.separator())
         }
+
+        // 0. Claude's usage, as a card.
+        let cardItem = NSMenuItem()
+        cardItem.view = usageCard
+        menu.addItem(cardItem)
+        menu.addItem(.separator())
 
         // 1. Every Claude session, each a checkbox: ticked = picked back up after a limit resets.
         rowBoxes = [:]

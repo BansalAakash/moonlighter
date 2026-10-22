@@ -57,6 +57,7 @@ export async function findClaudeBinary(config = {}, env = process.env) {
   const dirs = [
     ...(env.PATH || '').split(delimiter),
     join(homedir(), '.local', 'bin'), join(homedir(), '.claude', 'local'),
+    join(homedir(), '.npm-global', 'bin'), join(homedir(), '.volta', 'bin'),
     '/opt/homebrew/bin', '/usr/local/bin',
     ...(await fnmBinDirs()),
   ].filter(Boolean);
@@ -86,11 +87,15 @@ export function parseUsageOutput(text, config) {
   if (!parsed) return null;
   const resetAt = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
   const w = WEEK_ROW.exec(text);
+  // The weekly line carries a date, so it can be turned into an instant like the session one.
+  const wParsed = w ? parseResetTime(`resets ${w[2]}`) : null;
+  const weeklyResetAt = wParsed ? Date.now() + calculateWaitMs(wParsed, config.marginSeconds, config.fallbackWaitHours) : 0;
   return {
     resetAt,
     percentUsed: parseInt(s[1], 10),
     weeklyPercentUsed: w ? parseInt(w[1], 10) : null,
     weeklyResetText: w ? `Resets ${w[2].trim()}` : null,
+    weeklyResetAt,
   };
 }
 

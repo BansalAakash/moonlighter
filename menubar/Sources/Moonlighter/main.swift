@@ -4,6 +4,32 @@ import AppKit
 // agent with no window, so without this there is no way to see what it actually read — an
 // empty menu could equally mean "no sessions" or "the status directory moved". It is also how
 // the reader is re-checked after any change to the daemon's status-file format.
+// `Moonlighter --card-png <path> [session% week%]` renders the usage card to a PNG, so how it looks can be
+// checked without opening a menu. With no figures it uses the real, current reading.
+if let i = CommandLine.arguments.firstIndex(of: "--card-png"), CommandLine.arguments.count > i + 1 {
+    let args = CommandLine.arguments
+    _ = NSApplication.shared
+    let card = UsageCardView()
+    card.loading = false
+    if args.count > i + 3, let s = Int(args[i + 2]), let w = Int(args[i + 3]) {
+        let later = Date().addingTimeInterval(3 * 3600)
+        card.usage = Usage(sessionPercent: s, sessionResetAt: later, weeklyPercent: w,
+                           weeklyResetAt: Date().addingTimeInterval(40 * 3600), checkedAt: Date())
+    } else {
+        let r = Controller.cli(["usage"], timeout: 45)
+        card.usage = Usage.parse(r.out.split(separator: "\n").last.map(String.init) ?? "")
+    }
+    let holder = NSView(frame: card.bounds)
+    holder.wantsLayer = true
+    holder.layer?.backgroundColor = NSColor(white: 0.13, alpha: 1).cgColor
+    holder.appearance = NSAppearance(named: .darkAqua)
+    holder.addSubview(card)
+    let rep = holder.bitmapImageRepForCachingDisplay(in: holder.bounds)!
+    holder.cacheDisplay(in: holder.bounds, to: rep)
+    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
+    exit(0)
+}
+
 // `Moonlighter --login-item on|off` is the menu toggle, without the menu. It exists because
 // the interesting property of that toggle is what happens on the NEXT launch (turning it off
 // must survive one), and a GUI-only switch cannot be exercised in a scripted check.

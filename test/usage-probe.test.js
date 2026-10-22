@@ -78,3 +78,10 @@ describe('probeViaHeadless', () => {
     assert.equal(bad, null);
   });
 });
+
+describe('weekly reset instant', () => {
+  it('is parsed from the weekly line', () => {
+    const r = parseUsageOutput(OUT, DEFAULT_CONFIG);
+    assert.ok(r.weeklyResetAt > 0);
+  });
+});
