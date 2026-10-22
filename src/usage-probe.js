@@ -111,3 +111,17 @@ export async function probeViaHeadless(config, scratchCwd, run = execFile) {
     return parseUsageOutput(stdout, config);
   } catch { return null; }
 }
+
+// The subscription tier ("pro", "max", …) from `claude auth status --json`. Only that one field is
+// kept — the email and org the command also prints are dropped here. null if signed out or unreadable.
+export async function readPlan(config = {}, run = execFile) {
+  const binary = await findClaudeBinary(config);
+  if (!binary) return null;
+  try {
+    const { stdout } = await run(binary, ['auth', 'status', '--json'], {
+      env: minimalEnv(binary), timeout: 15_000, killSignal: 'SIGKILL', maxBuffer: 1 << 20,
+    });
+    const j = JSON.parse(stdout);
+    return j && j.loggedIn && typeof j.subscriptionType === 'string' ? j.subscriptionType : null;
+  } catch { return null; }
+}

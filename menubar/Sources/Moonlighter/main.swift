@@ -1,32 +1,37 @@
 import AppKit
+import SwiftUI
 
 // `Moonlighter --dump` prints what the menu would show, then exits. The app is a menu-bar
 // agent with no window, so without this there is no way to see what it actually read — an
 // empty menu could equally mean "no sessions" or "the status directory moved". It is also how
 // the reader is re-checked after any change to the daemon's status-file format.
-// `Moonlighter --card-png <path> [session% week%]` renders the usage card to a PNG, so how it looks can be
-// checked without opening a menu. With no figures it uses the real, current reading.
-if let i = CommandLine.arguments.firstIndex(of: "--card-png"), CommandLine.arguments.count > i + 1 {
+// `Moonlighter --panel-png <path> [session% week%]` renders the panel to a PNG, so how it looks can be
+// checked without opening it. With no figures it uses the real, current reading and sessions.
+if let i = CommandLine.arguments.firstIndex(of: "--panel-png"), CommandLine.arguments.count > i + 1 {
     let args = CommandLine.arguments
     _ = NSApplication.shared
-    let card = UsageCardView()
-    card.loading = false
+    let model = PanelModel()
+    model.loading = false
+    model.sessions = Snapshot.loadFull()
     if args.count > i + 3, let s = Int(args[i + 2]), let w = Int(args[i + 3]) {
-        let later = Date().addingTimeInterval(3 * 3600)
-        card.usage = Usage(sessionPercent: s, sessionResetAt: later, weeklyPercent: w,
-                           weeklyResetAt: Date().addingTimeInterval(40 * 3600), checkedAt: Date())
+        model.usage = Usage(sessionPercent: s, sessionResetAt: Date().addingTimeInterval(3 * 3600), weeklyPercent: w,
+                            weeklyResetAt: Date().addingTimeInterval(40 * 3600), checkedAt: Date(), plan: "max")
     } else {
         let r = Controller.cli(["usage"], timeout: 45)
-        card.usage = Usage.parse(r.out.split(separator: "\n").last.map(String.init) ?? "")
+        model.usage = Usage.parse(r.out.split(separator: "\n").last.map(String.init) ?? "")
     }
-    let holder = NSView(frame: card.bounds)
-    holder.wantsLayer = true
-    holder.layer?.backgroundColor = NSColor(white: 0.13, alpha: 1).cgColor
-    holder.appearance = NSAppearance(named: .darkAqua)
-    holder.addSubview(card)
-    let rep = holder.bitmapImageRepForCachingDisplay(in: holder.bounds)!
-    holder.cacheDisplay(in: holder.bounds, to: rep)
-    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
+    let dark = !args.contains("--light")
+    let view = PanelView(model: model)
+        .background(dark ? Color(white: 0.16) : Color(white: 0.97))
+        .environment(\.colorScheme, dark ? .dark : .light)
+    MainActor.assumeIsolated {
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        if let cg = renderer.cgImage {
+            let rep = NSBitmapImageRep(cgImage: cg)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
+        }
+    }
     exit(0)
 }
 

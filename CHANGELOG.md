@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-22
+
+### Changed
+- **A panel instead of a plain menu.** Clicking the menu bar icon opens a rounded panel: the Claude mark, your
+  plan, the 5-hour and weekly windows as bars with large percentages and reset times (red at 90%), then your
+  terminal sessions as switches, and Refresh / Launch at Login / Quit at the bottom. Right-click (or
+  ctrl-click) still opens the classic menu.
+- The plan name (Pro, Max, …) comes from `claude auth status --json`; only that one field is kept.
+
 ## [1.3.0] - 2026-10-22
 
 ### Added

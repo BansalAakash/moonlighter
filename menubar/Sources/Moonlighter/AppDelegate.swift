@@ -1,3 +1,4 @@
+import SwiftUI
 import AppKit
 import ServiceManagement
 
@@ -20,14 +21,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var usage: Usage?
     private var usageLoading = true
     private var usageRefreshing = false
-    private let usageCard = UsageCardView()
+    private let model = PanelModel()
+    private let popover = NSPopover()
+    private let contextMenu = NSMenu()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        let menu = NSMenu()
-        menu.delegate = self
-        item.menu = menu
+        contextMenu.delegate = self
         statusItem = item
+        // Left click opens the panel; right click (or ctrl-click) opens the plain menu.
+        item.button?.target = self
+        item.button?.action = #selector(statusClicked(_:))
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        setUpPanel()
 
         refresh(full: true)
         // 5s matches the monitor's own default poll, so the bar is never more than one tick
@@ -62,11 +68,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                     self.usage = parsed
                 }
-                self.usageCard.usage = self.usage
-                self.usageCard.loading = false
+                self.model.usage = self.usage
+                self.model.loading = false
                 self.apply(self.sessions)
             }
         }
+    }
+
+    // MARK: - Panel
+
+    private func setUpPanel() {
+        model.onToggle = { [weak self] s, on in self?.setAutoResume(s, on) }
+        model.onToggleAll = { [weak self] in self?.toggleAll() }
+        model.onRefresh = { [weak self] in self?.refresh(full: true); self?.refreshUsage(maxAge: 1) }
+        model.onQuit = { NSApp.terminate(nil) }
+        model.onEditSharedPrompt = { Controller.openConfig() }
+        model.onEditSessionPrompt = { Controller.openSessionPrompt($0) }
+        model.onFixMonitoring = { [weak self] in self?.restartAll() }
+        model.onLaunchAtLogin = { [weak self] on in
+            if let problem = Controller.setLaunchAtLogin(on) { Controller.notify("Open at Login", problem) }
+            self?.model.launchAtLogin = Controller.launchAtLoginEnabled
+        }
+        let host = NSHostingController(rootView: PanelView(model: model))
+        host.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = host
+        popover.behavior = .transient
+        popover.animates = true
+    }
+
+    @objc private func statusClicked(_ sender: NSStatusBarButton) {
+        guard let button = statusItem?.button else { return }
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+            popover.performClose(nil)
+            statusItem?.menu = contextMenu
+            button.performClick(nil)
+            statusItem?.menu = nil
+            return
+        }
+        if popover.isShown { popover.performClose(nil); return }
+        model.launchAtLogin = Controller.launchAtLoginEnabled
+        model.usage = usage
+        model.loading = usageLoading
+        refresh(full: true)
+        refreshUsage(maxAge: 90)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
     }
 
     private static let didFirstRunSetupKey = "didFirstRunSetup"
@@ -168,6 +215,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func apply(_ loaded: [Session]) {
         sessions = loaded
+        model.sessions = loaded
+        for (pane, _) in model.pending where !pendingToggles.contains(pane) { model.pending[pane] = nil }
         guard let button = statusItem?.button else { return }
 
         let (image, label) = Self.face(for: sessions, usage: usage)
@@ -227,8 +276,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         isMenuOpen = true
         refresh(full: true)
-        usageCard.usage = usage
-        usageCard.loading = usageLoading
         refreshUsage(maxAge: 90)
         rebuild(menu)
     }
@@ -255,12 +302,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(warn)
             menu.addItem(.separator())
         }
-
-        // 0. Claude's usage, as a card.
-        let cardItem = NSMenuItem()
-        cardItem.view = usageCard
-        menu.addItem(cardItem)
-        menu.addItem(.separator())
 
         // 1. Terminal sessions — only the part of Moonlighter that watches `claude` in tmux. With none
         // being watched it steps back into a submenu, so the menu is just the usage card.
@@ -453,8 +494,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func sessionToggled(_ sender: SessionCheckbox) {
         guard let s = sender.session else { return }
-        let on = sender.state == .on          // the click already flipped it; this is the wish
+        setAutoResume(s, sender.state == .on)     // the click already flipped it; this is the wish
+    }
+
+    private func setAutoResume(_ s: Session, _ on: Bool) {
         pendingToggles.insert(s.pane)
+        model.pending[s.pane] = on
         // Both directions shell out (exclude-self, or reconcile after the file edit), which is
         // slow enough to freeze the menu bar if done inline. The menu stays open throughout.
         DispatchQueue.global(qos: .userInitiated).async {

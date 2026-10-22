@@ -169,14 +169,22 @@ enum ClaudeMark {
         return p
     }
 
-    /// Fills the mark into `rect` (a flipped view's coordinates).
-    static func draw(in rect: NSRect, color: NSColor) {
-        let t = NSAffineTransform()
-        t.translateX(by: rect.minX, yBy: rect.minY)
-        t.scaleX(by: rect.width / viewBox, yBy: rect.height / viewBox)
-        let p = path()
-        p.transform(using: t as AffineTransform)
-        color.setFill()
-        p.fill()
+    /// The same path as a CGPath scaled into `size` (macOS 13 has no NSBezierPath.cgPath).
+    static func cgPath(size: CGFloat) -> CGPath {
+        let path = path()
+        let out = CGMutablePath()
+        var pts = [NSPoint](repeating: .zero, count: 3)
+        let k = size / viewBox
+        func q(_ p: NSPoint) -> CGPoint { CGPoint(x: p.x * k, y: p.y * k) }
+        for i in 0..<path.elementCount {
+            switch path.element(at: i, associatedPoints: &pts) {
+            case .moveTo: out.move(to: q(pts[0]))
+            case .lineTo: out.addLine(to: q(pts[0]))
+            case .curveTo: out.addCurve(to: q(pts[2]), control1: q(pts[0]), control2: q(pts[1]))
+            case .closePath: out.closeSubpath()
+            @unknown default: break
+            }
+        }
+        return out
     }
 }

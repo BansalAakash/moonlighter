@@ -19,6 +19,7 @@ import {
 } from '../src/setup.js';
 import { getSessionUsage, DEFAULT_CACHE_FILE } from '../src/session-reset.js';
 import { loadConfig } from '../src/config.js';
+import { readPlan } from '../src/usage-probe.js';
 import { reconcile, excludeSelf, parseRunningMonitors, PGREP_LIST_FLAG } from '../src/reconcile.js';
 
 export { renderReconcilePlist };
@@ -458,7 +459,18 @@ async function cmdUsage() {
   const usage = await getSessionUsage(null, cfg, DEFAULT_CACHE_FILE, undefined, { scratchFallback: false });
   let checkedAt = 0;
   try { checkedAt = JSON.parse(await readFile(DEFAULT_CACHE_FILE, 'utf-8')).checkedAt || 0; } catch { /* none yet */ }
-  console.log(JSON.stringify({ ...usage, checkedAt }));
+  // The plan changes rarely: re-read it at most once an hour.
+  const planFile = join(homedir(), '.claude-auto-retry', 'plan.json');
+  let plan = null;
+  try {
+    const c = JSON.parse(await readFile(planFile, 'utf-8'));
+    if (c && Date.now() - c.at < 3600_000) plan = c.plan;
+    else throw new Error('stale');
+  } catch {
+    plan = await readPlan(config);
+    if (plan) { try { await writeFile(planFile, JSON.stringify({ plan, at: Date.now() })); } catch { /* cache only */ } }
+  }
+  console.log(JSON.stringify({ ...usage, checkedAt, plan }));
 }
 
 async function cmdVersion() {
